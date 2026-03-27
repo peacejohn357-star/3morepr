@@ -22,6 +22,8 @@
     strategyMode:      'indicator', // 'indicator' | 'classic'
     indicatorPreset:   'balanced',  // 'aggressive' | 'balanced' | 'conservative'
     minIndicatorScore: 3,           // minimum combined indicator score to fire a signal (2–5)
+    sameSideCooldownTicks: 5,       // minimum ticks before allowing another entry in the same direction
+    chopHistThreshold: 0.0002,      // MACD histogram magnitude below which market is considered choppy
     // ── Classic spike settings (used when strategyMode === 'classic') ──────
     spikeMode:        'auto',  // 'auto' | 'percent' | 'points'
     spikeThreshold:   0.001,   // minimum % price-move considered a spike (permissive default for calibration)
@@ -40,7 +42,9 @@
   let signals     = [];  // { type, price, time, result, ticksAfter, priceAfter }
   let wins        = 0;
   let losses      = 0;
-  let lastSignalTickIndex = -999; // tick buffer index of last fired signal (cooldown tracking)
+  let lastSignalTickIndex     = -999; // tick buffer index of last fired signal (cooldown tracking)
+  let lastSignalSide          = null; // 'BUY' | 'SELL' | null – for same-side cooldown
+  let lastSignalSideTickIndex = -999; // tick buffer index of last same-side signal
 
   let tickLog     = [];    // in-memory tick log rows for diagnostics
   let tickLogging = false; // true when user has started tick logging
@@ -946,6 +950,36 @@
     return { k: latestK, d: latestD, kAboveD: latestK > latestD, kRising: latestK > prevK };
   }
 
+  // Derive short-term trend from MA4 slope and recent candle close direction
+  // Returns 'up', 'down', or 'flat'
+  function deriveTrend () {
+    // Need enough data for MA4 and at least 1 candle for direction
+    if (ticks.length < 4 || candles.length < 1) return 'flat';
+
+    const tickPrices = ticks.map(function (t) { return t.price; });
+    const ma4 = calcMA4(tickPrices);
+
+    // Count bullish vs bearish candles among last 3
+    let bullishCandles = 0, bearishCandles = 0;
+    const last3 = candles.slice(-3);
+    last3.forEach(function (c) {
+      if (c.close > c.open) bullishCandles++;
+      else if (c.close < c.open) bearishCandles++;
+    });
+
+    const ma4Up   = ma4 && ma4.rising;
+    const ma4Down = ma4 && !ma4.rising;
+
+    // Strong up: MA4 rising AND most recent candles bullish
+    if (ma4Up && bullishCandles >= 2)   return 'up';
+    // Strong down: MA4 falling AND most recent candles bearish
+    if (ma4Down && bearishCandles >= 2) return 'down';
+    // Candle direction without MA4 contradiction
+    if (bullishCandles >= 2 && !ma4Down) return 'up';
+    if (bearishCandles >= 2 && !ma4Up)   return 'down';
+    return 'flat';
+  }
+
   // Score all five indicators for current market state
   // Returns { buyScore, sellScore, buyComponents, sellComponents, ...rawIndicators }
   function scoreIndicators () {
@@ -1010,36 +1044,92 @@
     if (n < 5) return null;
 
     const ind = scoreIndicators();
-    const { buyScore, sellScore, buyComponents, sellComponents } = ind;
+    const { buyScore, sellScore, buyComponents, sellComponents, macd, rsi } = ind;
 
-    let candidate  = null;
-    let score      = 0;
-    let components = '';
     const minScore = cfg.minIndicatorScore != null ? cfg.minIndicatorScore : 3;
-
-    if (buyScore > sellScore && buyScore >= minScore) {
-      candidate  = 'BUY';
-      score      = buyScore;
-      components = buyComponents;
-    } else if (sellScore > buyScore && sellScore >= minScore) {
-      candidate  = 'SELL';
-      score      = sellScore;
-      components = sellComponents;
-    }
+    const preset   = cfg.indicatorPreset || 'balanced';
+    const requiredMargin = preset === 'conservative' ? 2 : 1;
 
     const baseResult = { buyScore, sellScore, buyComponents, sellComponents };
 
-    if (!candidate) {
+    // 1. Tie / ambiguous – never default to BUY
+    if (buyScore === sellScore) {
+      if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: tie_ambiguous buy=' + buyScore + ' sell=' + sellScore);
+      return Object.assign(baseResult, { candidate: null, rejectReason: 'tie_ambiguous', fired: false });
+    }
+
+    // 2. Determine raw winner
+    let candidate, score, components, loserScore;
+    if (buyScore > sellScore) {
+      candidate = 'BUY'; score = buyScore; components = buyComponents; loserScore = sellScore;
+    } else {
+      candidate = 'SELL'; score = sellScore; components = sellComponents; loserScore = buyScore;
+    }
+
+    // 3. Minimum score gate
+    if (score < minScore) {
       const reason = 'buy=' + buyScore + ' sell=' + sellScore + ' need>=' + minScore;
       if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: score too low – ' + reason);
       return Object.assign(baseResult, { candidate: null, rejectReason: 'score_threshold', fired: false });
     }
 
-    // Cooldown guard
+    // 4. Score margin gate (anti-ambiguity)
+    if ((score - loserScore) < requiredMargin) {
+      if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: score_margin buy=' + buyScore + ' sell=' + sellScore + ' need margin>=' + requiredMargin);
+      return Object.assign(baseResult, { candidate: null, rejectReason: 'score_margin', fired: false });
+    }
+
+    // 5. Hard trend gate
+    const trend = deriveTrend();
+    if (trend === 'down' && candidate === 'BUY') {
+      // Allow strong counter-trend BUY only if margin >= 2 and RSI/Stoch turning
+      const strongCounterTrend = (buyScore >= sellScore + 2) && rsi && rsi.rising && rsi.value < 45; // RSI below oversold threshold
+      if (!strongCounterTrend) {
+        if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: trend_block_buy (trend=down, buy=' + buyScore + ' sell=' + sellScore + ')');
+        return Object.assign(baseResult, { candidate: null, rejectReason: 'trend_block_buy', fired: false });
+      }
+    }
+    if (trend === 'up' && candidate === 'SELL') {
+      const strongCounterTrend = (sellScore >= buyScore + 2) && rsi && !rsi.rising && rsi.value > 55; // RSI above overbought threshold
+      if (!strongCounterTrend) {
+        if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: trend_block_sell (trend=up, buy=' + buyScore + ' sell=' + sellScore + ')');
+        return Object.assign(baseResult, { candidate: null, rejectReason: 'trend_block_sell', fired: false });
+      }
+    }
+    if (trend === 'flat') {
+      // Stricter in choppy/flat market: require minScore+1 or margin>=2
+      const flatMinScore = minScore + 1;
+      const flatMargin   = 2;
+      if (score < flatMinScore || (score - loserScore) < flatMargin) {
+        if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: score_margin (flat trend, need score>=' + flatMinScore + ' margin>=' + flatMargin + ')');
+        return Object.assign(baseResult, { candidate: null, rejectReason: 'score_margin', fired: false });
+      }
+    }
+
+    // 6. Anti-chop filter: RSI neutral band AND MACD histogram near zero
+    const chopHistThresh = cfg.chopHistThreshold != null ? cfg.chopHistThreshold : 0.0002;
+    if (rsi && rsi.value >= 45 && rsi.value <= 55) { // RSI in neutral band (45–55)
+      if (macd && Math.abs(macd.histogram) <= chopHistThresh) {
+        if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: chop_filter (RSI=' + rsi.value.toFixed(1) + ' hist=' + macd.histogram.toFixed(5) + ')');
+        return Object.assign(baseResult, { candidate: null, rejectReason: 'chop_filter', fired: false });
+      }
+    }
+
+    // 7. Global cooldown guard
     const ticksSinceLast = (n - 1) - lastSignalTickIndex;
     if (ticksSinceLast < cfg.cooldownTicks) {
       if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: cooldown (' + ticksSinceLast + ' ticks since last, need ' + cfg.cooldownTicks + ')');
       return Object.assign(baseResult, { candidate, rejectReason: 'cooldown', fired: false });
+    }
+
+    // 8. Same-side cooldown guard
+    const sameSideCooldown = cfg.sameSideCooldownTicks != null ? cfg.sameSideCooldownTicks : 5;
+    if (lastSignalSide === candidate) {
+      const ticksSinceLastSameSide = (n - 1) - lastSignalSideTickIndex;
+      if (ticksSinceLastSameSide < sameSideCooldown) {
+        if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: same_side_cooldown (' + candidate + ' ' + ticksSinceLastSameSide + ' ticks since last, need ' + sameSideCooldown + ')');
+        return Object.assign(baseResult, { candidate, rejectReason: 'same_side_cooldown', fired: false });
+      }
     }
 
     const sigPrice = ticks[n - 1].price;
@@ -1050,13 +1140,15 @@
       return Object.assign(baseResult, { candidate, rejectReason: 'duplicate', fired: false });
     }
 
-    lastSignalTickIndex = n - 1;
+    lastSignalTickIndex     = n - 1;
+    lastSignalSide          = candidate;
+    lastSignalSideTickIndex = n - 1;
 
     const sig = { type: candidate, price: sigPrice, time: sigTime, result: 'PENDING', ticksAfter: [] };
     signals.push(sig);
     if (signals.length > 50) signals.shift();
 
-    if (cfg.debugSignals) console.log('[3Tick][indicator] ACCEPTED ' + candidate + ' score=' + score + ' (' + components + ') at price ' + sigPrice + ' time ' + sigTime);
+    if (cfg.debugSignals) console.log('[3Tick][indicator] ACCEPTED ' + candidate + ' score=' + score + ' (' + components + ') trend=' + trend + ' at price ' + sigPrice + ' time ' + sigTime);
 
     updateSignalsUI();
     return Object.assign(baseResult, { candidate, rejectReason: null, fired: true });
@@ -1162,6 +1254,8 @@
       strategyMode:      'indicator',
       indicatorPreset:   'balanced',
       minIndicatorScore: 3,
+      sameSideCooldownTicks: 5,
+      chopHistThreshold: 0.0002,
       spikeMode:        'auto',
       spikeThreshold:   0.001,
       minSpikePoints:   0.1,
