@@ -6,13 +6,13 @@
   'use strict';
 
   // ── Constants & config ────────────────────────────────────────────────────
-  const WS_URL      = 'wss://ws.deriv.com/websockets/v3?app_id=1089';
-  const SYMBOL      = 'stpRNG';
-  const TICK_BUF    = 200;
-  const CANDLE_BUF  = 200;
-  const SR_WINDOW   = 30;    // candles used for S/R scan
-  const SR_COUNT    = 3;     // how many R and S levels to show
-  const RECONNECT_DELAY = 4000;
+  const WS_URL          = 'wss://ws.deriv.com/websockets/v3?app_id=1089';
+  const TICK_BUF        = 200;
+  const CANDLE_BUF      = 200;
+  const SR_WINDOW       = 30;    // candles used for S/R scan
+  const SR_COUNT        = 3;     // how many R and S levels to show
+  const RECONNECT_BASE  = 4000;  // ms – initial reconnect delay
+  const RECONNECT_MAX   = 64000; // ms – reconnect delay cap
 
   let cfg = {
     spikeThreshold: 0.30,  // minimum % price-move considered a spike
@@ -29,6 +29,9 @@
   let ws             = null;
   let wsState        = 'disconnected';
   let reconnectTimer = null;
+  let resolvedSymbol = null;  // resolved after active_symbols handshake
+  let manualClose    = false; // set true when user clicks Close; suppresses reconnect
+  let reconnectDelay = RECONNECT_BASE; // grows with each failed attempt
 
   // ── Overlay build ─────────────────────────────────────────────────────────
   function buildOverlay () {
@@ -141,9 +144,10 @@
     });
 
     document.getElementById('tt-close-btn').addEventListener('click', function () {
-      el.remove();
+      manualClose = true;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       if (ws) { ws.close(); ws = null; }
-      if (reconnectTimer) clearTimeout(reconnectTimer);
+      el.remove();
     });
 
     document.getElementById('tt-config-toggle').addEventListener('click', function () {
@@ -163,49 +167,106 @@
   }
 
   // ── WebSocket ─────────────────────────────────────────────────────────────
+
+  // Pick the Step Index 100 symbol from an active_symbols response array.
+  function resolveSymbol (symbols) {
+    // Prefer known Deriv symbol identifiers for Step Index 100
+    var candidates = ['stpRNG', 'STPRNG'];
+    for (var i = 0; i < candidates.length; i++) {
+      if (symbols.find(function (s) { return s.symbol === candidates[i]; })) {
+        return candidates[i];
+      }
+    }
+    // Fallback: match by display_name
+    var byName = symbols.find(function (s) {
+      return /step\s*index\s*100/i.test(s.display_name) || /step\s*100/i.test(s.display_name);
+    });
+    if (byName) return byName.symbol;
+    // Broader fallback: any symbol with "step" in the display name
+    var step = symbols.find(function (s) {
+      return /step/i.test(s.display_name);
+    });
+    return step ? step.symbol : null;
+  }
+
   function connect () {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
     setWsState('connecting');
+    console.log('[3Tick] connecting to', WS_URL);
 
     ws = new WebSocket(WS_URL);
 
     ws.addEventListener('open', function () {
+      console.log('[3Tick] WebSocket open – requesting active_symbols');
       setWsState('connected');
-      // Subscribe to ticks
-      ws.send(JSON.stringify({ ticks: SYMBOL, subscribe: 1 }));
-      // Subscribe to 1-minute candles
-      ws.send(JSON.stringify({ ticks_history: SYMBOL, subscribe: 1, granularity: 60,
-                               style: 'candles', count: CANDLE_BUF, end: 'latest' }));
+      reconnectDelay = RECONNECT_BASE; // reset backoff on successful connection
+      // Discover the correct symbol before subscribing
+      ws.send(JSON.stringify({ active_symbols: 'brief', product_type: 'basic' }));
     });
 
     ws.addEventListener('message', function (e) {
-      let msg;
+      var msg;
       try { msg = JSON.parse(e.data); } catch (_) { return; }
-      if (msg.error) { showAlert(msg.error.message || 'API error'); return; }
+
+      if (msg.error) {
+        console.error('[3Tick] API error', msg.error.code, msg.error.message, msg);
+        showAlert('API error: ' + (msg.error.message || msg.error.code || 'unknown'));
+        return;
+      }
+
+      if (msg.msg_type === 'active_symbols') {
+        var sym = resolveSymbol(msg.active_symbols || []);
+        if (!sym) {
+          console.error('[3Tick] Step Index 100 not found in active_symbols', msg.active_symbols);
+          showAlert('Step Index 100 not available on this account/region. Check console for details.');
+          return;
+        }
+        resolvedSymbol = sym;
+        console.log('[3Tick] resolved symbol:', resolvedSymbol);
+        // Subscribe to live ticks
+        ws.send(JSON.stringify({ ticks: resolvedSymbol, subscribe: 1 }));
+        // Request candle history + live OHLC stream
+        ws.send(JSON.stringify({
+          ticks_history: resolvedSymbol, subscribe: 1,
+          granularity: 60, style: 'candles', count: CANDLE_BUF, end: 'latest',
+        }));
+        return;
+      }
 
       if (msg.msg_type === 'tick')         { handleTick(msg.tick); }
       else if (msg.msg_type === 'ohlc')    { handleOHLC(msg.ohlc); }
       else if (msg.msg_type === 'candles') { handleHistoryCandles(msg.candles); }
     });
 
-    ws.addEventListener('close', function () {
+    ws.addEventListener('close', function (e) {
+      var info = `code=${e.code}${e.reason ? ' reason=' + e.reason : ''}`;
+      console.warn('[3Tick] WebSocket closed –', info);
       setWsState('disconnected');
-      scheduleReconnect();
+      resolvedSymbol = null;
+      if (!manualClose) {
+        showAlert('Disconnected (' + info + '). Reconnecting…');
+        scheduleReconnect();
+      }
     });
 
-    ws.addEventListener('error', function () {
+    ws.addEventListener('error', function (e) {
+      console.error('[3Tick] WebSocket error', e);
       setWsState('disconnected');
-      ws.close();
+      ws.close(); // triggers the close handler which schedules reconnect
     });
   }
 
   function scheduleReconnect () {
-    if (reconnectTimer) return;
+    if (reconnectTimer) return; // already waiting
+    var delay = reconnectDelay;
+    console.log('[3Tick] reconnecting in', delay, 'ms');
     reconnectTimer = setTimeout(function () {
       reconnectTimer = null;
       connect();
-    }, RECONNECT_DELAY);
+    }, delay);
+    // Exponential backoff, capped at RECONNECT_MAX
+    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX);
   }
 
   function setWsState (state) {
@@ -219,7 +280,7 @@
 
   // ── Tick handling ─────────────────────────────────────────────────────────
   function handleTick (tick) {
-    if (!tick || tick.symbol !== SYMBOL) return;
+    if (!tick || tick.symbol !== resolvedSymbol) return;
     const price = parseFloat(tick.quote);
     const time  = tick.epoch;
 
@@ -250,7 +311,7 @@
   }
 
   function handleOHLC (ohlc) {
-    if (!ohlc || ohlc.symbol !== SYMBOL) return;
+    if (!ohlc || ohlc.symbol !== resolvedSymbol) return;
     const c = { open: +ohlc.open, high: +ohlc.high, low: +ohlc.low, close: +ohlc.close, time: +ohlc.open_time };
     // Replace last candle if same epoch, otherwise push new
     if (candles.length && candles[candles.length - 1].time === c.time) {
