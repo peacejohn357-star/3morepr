@@ -27,6 +27,7 @@
     minIndicatorScore: 3,           // minimum combined indicator score to fire a signal (2–5)
     sameSideCooldownTicks: 5,       // minimum ticks before allowing another entry in the same direction
     chopHistThreshold: 0.0002,      // MACD histogram magnitude below which market is considered choppy
+    entryProfile:      'balanced',  // 'early' | 'balanced' | 'strict' – maps to chop/alignment/two-stage thresholds
     macdTrendEpsilon:  0.00005,     // dead-zone half-width for tick-MACD trend classification
     macdTrendLookback: 3,           // number of recent ticks used to check histogram direction
     // ── Classic spike settings (used when strategyMode === 'classic') ──────
@@ -50,6 +51,7 @@
   let lastSignalTickIndex     = -999; // tick buffer index of last fired signal (cooldown tracking)
   let lastSignalSide          = null; // 'BUY' | 'SELL' | null – for same-side cooldown
   let lastSignalSideTickIndex = -999; // tick buffer index of last same-side signal
+  let pendingSetup            = null; // { side: 'BUY'|'SELL', tickIndex, hist } – two-stage entry confirmation
 
   let lastTickProcessedAt  = 0;    // Date.now() of last tick received (for watchdog)
   let lastSignalEvalAt     = 0;    // Date.now() of last successful detectSignal() call (for watchdog)
@@ -118,6 +120,14 @@
             </select>
           </div>
           <div id="tt-indicator-controls">
+            <div class="tt-config-row">
+              <label>Entry profile</label>
+              <select id="tt-cfg-entry-profile">
+                <option value="early">Early (more entries)</option>
+                <option value="balanced">Balanced (default)</option>
+                <option value="strict">Strict (fewer, cleaner)</option>
+              </select>
+            </div>
             <div class="tt-config-row">
               <label>Indicator preset</label>
               <select id="tt-cfg-indicator-preset">
@@ -272,6 +282,14 @@
       syncStrategyModeUI(cfg.strategyMode);
       saveCfg();
     });
+
+    const entryProfileEl = document.getElementById('tt-cfg-entry-profile');
+    if (entryProfileEl) {
+      entryProfileEl.addEventListener('change', function () {
+        cfg.entryProfile = this.value;
+        saveCfg();
+      });
+    }
 
     document.getElementById('tt-cfg-indicator-preset').addEventListener('change', function () {
       cfg.indicatorPreset = this.value;
@@ -574,6 +592,13 @@
           return (v != null && !isNaN(v)) ? (+v).toFixed(6) : '';
         }()),
         macd_trend:   (isIndicatorMode && detection && detection.macdTrend) ? detection.macdTrend : '',
+        // entry-quality observability fields
+        entry_profile:        isIndicatorMode ? (cfg.entryProfile || 'balanced') : '',
+        chop_score:           (isIndicatorMode && detection && detection.chopScore != null) ? detection.chopScore : '',
+        alignment_score_buy:  (isIndicatorMode && detection && detection.alignmentScoreBuy  != null) ? detection.alignmentScoreBuy  : '',
+        alignment_score_sell: (isIndicatorMode && detection && detection.alignmentScoreSell != null) ? detection.alignmentScoreSell : '',
+        setup_state:          (isIndicatorMode && detection && detection.setupState)   ? detection.setupState   : '',
+        entry_reason:         (isIndicatorMode && detection && detection.entryReason)  ? detection.entryReason  : '',
         // classic-mode fields
         spike_pct:        (!isIndicatorMode && detection && typeof detection.spikePct === 'number')
                             ? detection.spikePct.toFixed(5) : '',
@@ -1108,7 +1133,7 @@
     else if (macdLine < signalLine - epsilon)                { trend = 'down'; } // directional fallback
     else                                                     { trend = 'flat'; }
 
-    return { trend, macdLine, signalLine, hist };
+    return { trend, macdLine, signalLine, hist, histSeries: recentHist };
   }
 
   // Update the Trend display using tick-level MACD (called from handleTick)
@@ -1124,7 +1149,137 @@
     else                    { el.textContent = '↔ Side' + histStr; el.className = 'tt-val tt-trend-side'; }
   }
 
-  // Score all five indicators for current market state
+  // Map entryProfile to internal thresholds
+  // chopThreshold  – chop score must reach this value to block entry (higher = less blocking)
+  // alignMin       – minimum alignment score required to enter
+  // setupTimeoutTicks – ticks before a pending setup is discarded and restarted
+  // twoStage       – whether to require a 1-tick trigger confirmation before firing
+  function getProfileThresholds () {
+    const profile = cfg.entryProfile || 'balanced';
+    const map = {
+      early:    { chopThreshold: 4, alignMin: 2, setupTimeoutTicks: 3, twoStage: false },
+      balanced: { chopThreshold: 3, alignMin: 3, setupTimeoutTicks: 2, twoStage: true  },
+      strict:   { chopThreshold: 2, alignMin: 4, setupTimeoutTicks: 1, twoStage: true  },
+    };
+    return map[profile] || map.balanced;
+  }
+
+  // Compute a chop score from multiple sideways/indecision indicators.
+  // Returns { chopScore, reasons[] }.
+  // Higher chopScore → more chop. Profile chopThreshold determines when to block entry.
+  function isChopZone (tickMacd, ind, closes) {
+    const { rsi, bb, stoch } = ind;
+    let chopScore = 0;
+    const reasons = [];
+
+    // 1. RSI in neutral band (45–55)
+    if (rsi && rsi.value >= 45 && rsi.value <= 55) {
+      chopScore++;
+      reasons.push('rsi_neutral');
+    }
+
+    // 2. Tick-MACD histogram near zero (flat / indecision)
+    const chopHistThresh = cfg.chopHistThreshold != null ? cfg.chopHistThreshold : 0.0002;
+    if (isFinite(tickMacd.hist) && Math.abs(tickMacd.hist) <= chopHistThresh) {
+      chopScore++;
+      reasons.push('macd_hist_flat');
+    }
+
+    // 3. MACD histogram sign-flip count over recent series → frequent crosses = chop
+    const histSeries = tickMacd.histSeries || [];
+    if (histSeries.length >= 3) {
+      let flips = 0;
+      for (let i = 1; i < histSeries.length; i++) {
+        if ((histSeries[i] > 0) !== (histSeries[i - 1] > 0)) flips++;
+      }
+      if (flips >= 2) {
+        chopScore++;
+        reasons.push('macd_flipping');
+      }
+    }
+
+    // 4. Bollinger Band not expanding (or very compressed)
+    if (bb && closes && closes.length >= 14) {
+      const curWidth = bb.upper - bb.lower;
+      const prevBb   = calcBollinger(closes.slice(0, -1));
+      if (prevBb) {
+        const prevWidth = prevBb.upper - prevBb.lower;
+        if (curWidth <= prevWidth) {
+          chopScore++;
+          reasons.push('bb_not_expanding');
+        }
+      }
+      // BB very narrow relative to price (< 0.05% of mid)
+      if (bb.basis > 0 && (curWidth / bb.basis) < 0.0005) {
+        chopScore++;
+        reasons.push('bb_compressed');
+      }
+    }
+
+    // 5. Stoch K/D near cross (potential whipsaw zone)
+    if (stoch && Math.abs(stoch.k - stoch.d) < 8) {
+      chopScore++;
+      reasons.push('stoch_near_cross');
+    }
+
+    return { chopScore, reasons };
+  }
+
+  // Compute alignment scores for BUY and SELL.
+  // Each condition that aligns with the direction adds 1 point (max 6).
+  // BB expansion adds 1 to both sides (direction-agnostic volatility expansion).
+  function calcAlignmentScores (tickMacd, ind, currentPrice, closes) {
+    const { rsi, bb, ma4, stoch } = ind;
+    let buyAlignment  = 0;
+    let sellAlignment = 0;
+
+    // 1. Tick-MACD trend aligned
+    if (tickMacd.trend === 'up')   buyAlignment++;
+    if (tickMacd.trend === 'down') sellAlignment++;
+
+    // 2. MACD histogram direction and sign aligned (compare last two values for recency)
+    const histSeries = tickMacd.histSeries || [];
+    const histRising  = histSeries.length >= 2 &&
+      histSeries[histSeries.length - 1] > histSeries[histSeries.length - 2] && tickMacd.hist > 0;
+    const histFalling = histSeries.length >= 2 &&
+      histSeries[histSeries.length - 1] < histSeries[histSeries.length - 2] && tickMacd.hist < 0;
+    if (histRising)  buyAlignment++;
+    if (histFalling) sellAlignment++;
+
+    // 3. BB width expanding (volatility expansion favours entries in both directions)
+    if (bb && closes && closes.length >= 14) {
+      const curWidth = bb.upper - bb.lower;
+      const prevBb   = calcBollinger(closes.slice(0, -1));
+      if (prevBb && curWidth > prevBb.upper - prevBb.lower) {
+        buyAlignment++;
+        sellAlignment++;
+      }
+    }
+
+    // 4. Price vs MA4 – aligned with direction
+    if (ma4) {
+      if (currentPrice > ma4.value && ma4.rising)  buyAlignment++;
+      if (currentPrice < ma4.value && !ma4.rising) sellAlignment++;
+    }
+
+    // 5. RSI directional alignment
+    if (rsi) {
+      if (rsi.value > 50 && rsi.rising)  buyAlignment++;
+      if (rsi.value < 50 && !rsi.rising) sellAlignment++;
+    }
+
+    // 6. Stoch momentum aligned
+    // Note: buy uses OR (early/emerging signal); sell uses AND (both K<D and falling)
+    // This asymmetry intentionally matches the scoring logic in scoreIndicators().
+    if (stoch) {
+      if (stoch.kAboveD || stoch.kRising)   buyAlignment++;
+      if (!stoch.kAboveD && !stoch.kRising) sellAlignment++;
+    }
+
+    return { buyAlignment, sellAlignment };
+  }
+
+
   // Returns { buyScore, sellScore, buyComponents, sellComponents, ...rawIndicators }
   function scoreIndicators () {
     const closes      = candles.map(function (c) { return c.close; });
@@ -1285,6 +1440,77 @@
       }
     }
 
+    // ── Entry-quality gates (profile-driven) ─────────────────────────────
+    const closes     = candles.map(function (c) { return c.close; });
+    const thresholds = getProfileThresholds();
+
+    // 9. Full chop-zone blocker (multi-condition scoring)
+    const chopResult = isChopZone(tickMacd, ind, closes);
+    if (chopResult.chopScore >= thresholds.chopThreshold) {
+      if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: chop_zone score=' + chopResult.chopScore + ' reasons=[' + chopResult.reasons.join(',') + '] profile=' + (cfg.entryProfile || 'balanced'));
+      return Object.assign(baseResult, {
+        candidate, rejectReason: 'chop_zone', fired: false,
+        chopScore: chopResult.chopScore, entryReason: 'chop_zone',
+      });
+    }
+
+    // 10. Expansion+alignment filter
+    const currentPrice = ticks[n - 1].price;
+    const alignScores  = calcAlignmentScores(tickMacd, ind, currentPrice, closes);
+    const { buyAlignment, sellAlignment } = alignScores;
+    const alignScore = candidate === 'BUY' ? buyAlignment : sellAlignment;
+    if (alignScore < thresholds.alignMin) {
+      if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: alignment_insufficient ' + candidate + ' align=' + alignScore + ' need>=' + thresholds.alignMin + ' profile=' + (cfg.entryProfile || 'balanced'));
+      return Object.assign(baseResult, {
+        candidate, rejectReason: 'alignment_insufficient', fired: false,
+        chopScore: chopResult.chopScore, alignmentScoreBuy: buyAlignment, alignmentScoreSell: sellAlignment,
+        entryReason: 'alignment_insufficient',
+      });
+    }
+
+    // 11. Two-stage setup → trigger confirmation (balanced/strict profiles only)
+    if (thresholds.twoStage) {
+      if (pendingSetup && pendingSetup.side === candidate) {
+        const ticksSinceSetup = (n - 1) - pendingSetup.tickIndex;
+        if (ticksSinceSetup > thresholds.setupTimeoutTicks) {
+          // Setup expired – restart with this tick as new setup
+          pendingSetup = { side: candidate, tickIndex: n - 1, hist: tickMacd.hist };
+          if (cfg.debugSignals) console.log('[3Tick][indicator] setup_timeout for ' + candidate + ', restarting setup');
+          return Object.assign(baseResult, {
+            candidate, rejectReason: 'setup_timeout', fired: false,
+            chopScore: chopResult.chopScore, alignmentScoreBuy: buyAlignment, alignmentScoreSell: sellAlignment,
+            setupState: 'pending_' + candidate.toLowerCase(), entryReason: 'setup_timeout',
+          });
+        }
+        // Trigger confirmation: MACD hist must not have regressed since setup tick
+        const histDelta = (isFinite(tickMacd.hist) && isFinite(pendingSetup.hist))
+          ? (tickMacd.hist - pendingSetup.hist) : 0;
+        const triggerConfirmed = candidate === 'BUY' ? (histDelta >= 0) : (histDelta <= 0);
+        if (!triggerConfirmed) {
+          if (cfg.debugSignals) console.log('[3Tick][indicator] trigger_pending for ' + candidate + ' hist=' + (isFinite(tickMacd.hist) ? tickMacd.hist.toFixed(6) : 'n/a') + ' setupHist=' + (isFinite(pendingSetup.hist) ? pendingSetup.hist.toFixed(6) : 'n/a'));
+          return Object.assign(baseResult, {
+            candidate, rejectReason: 'trigger_pending', fired: false,
+            chopScore: chopResult.chopScore, alignmentScoreBuy: buyAlignment, alignmentScoreSell: sellAlignment,
+            setupState: 'pending_' + candidate.toLowerCase(), entryReason: 'trigger_pending',
+          });
+        }
+        // Trigger confirmed – clear setup and proceed to fire
+        pendingSetup = null;
+      } else {
+        // No matching pending setup (new or opposite side) – set setup for this tick
+        if (pendingSetup && pendingSetup.side !== candidate) {
+          if (cfg.debugSignals) console.log('[3Tick][indicator] setup_side_flip: discarding ' + pendingSetup.side + ' setup, starting ' + candidate + ' setup');
+        }
+        pendingSetup = { side: candidate, tickIndex: n - 1, hist: tickMacd.hist };
+        if (cfg.debugSignals) console.log('[3Tick][indicator] setup_pending for ' + candidate + ' at tick ' + (n - 1));
+        return Object.assign(baseResult, {
+          candidate, rejectReason: 'setup_pending', fired: false,
+          chopScore: chopResult.chopScore, alignmentScoreBuy: buyAlignment, alignmentScoreSell: sellAlignment,
+          setupState: 'pending_' + candidate.toLowerCase(), entryReason: 'setup_pending',
+        });
+      }
+    }
+
     const sigPrice = ticks[n - 1].price;
     const sigTime  = ticks[n - 1].time;
 
@@ -1301,10 +1527,14 @@
     signals.push(sig);
     if (signals.length > 50) signals.shift();
 
-    if (cfg.debugSignals) console.log('[3Tick][indicator] ACCEPTED ' + candidate + ' score=' + score + ' (' + components + ') tick_macd_trend=' + trend + ' macdLine=' + (isFinite(tickMacd.macdLine) ? tickMacd.macdLine.toFixed(6) : 'n/a') + ' hist=' + (isFinite(tickMacd.hist) ? tickMacd.hist.toFixed(6) : 'n/a') + ' at price ' + sigPrice + ' time ' + sigTime);
+    if (cfg.debugSignals) console.log('[3Tick][indicator] ACCEPTED ' + candidate + ' score=' + score + ' (' + components + ') align=' + alignScore + ' chop=' + chopResult.chopScore + ' tick_macd_trend=' + trend + ' macdLine=' + (isFinite(tickMacd.macdLine) ? tickMacd.macdLine.toFixed(6) : 'n/a') + ' hist=' + (isFinite(tickMacd.hist) ? tickMacd.hist.toFixed(6) : 'n/a') + ' profile=' + (cfg.entryProfile || 'balanced') + ' at price ' + sigPrice + ' time ' + sigTime);
 
     updateSignalsUI();
-    return Object.assign(baseResult, { candidate, rejectReason: null, fired: true });
+    return Object.assign(baseResult, {
+      candidate, rejectReason: null, fired: true,
+      chopScore: chopResult.chopScore, alignmentScoreBuy: buyAlignment, alignmentScoreSell: sellAlignment,
+      setupState: 'none', entryReason: 'alignment_trigger',
+    });
   }
 
   // ── UI helpers ────────────────────────────────────────────────────────────
@@ -1378,7 +1608,7 @@
       showAlert('No tick log data to export. Start logging first.');
       return;
     }
-    const headers = ['epoch', 'iso_time', 'symbol', 'price', 'strategy_mode', 'buy_score', 'sell_score', 'score_components', 'indicator_reason', 'trend_source', 'macd_line', 'macd_signal', 'macd_hist', 'macd_trend', 'spike_pct', 'spike_points', 'spike_threshold_used', 'spike_mode_used', 'signal_candidate', 'reject_reason', 'signal_fired'];
+    const headers = ['epoch', 'iso_time', 'symbol', 'price', 'strategy_mode', 'buy_score', 'sell_score', 'score_components', 'indicator_reason', 'trend_source', 'macd_line', 'macd_signal', 'macd_hist', 'macd_trend', 'entry_profile', 'chop_score', 'alignment_score_buy', 'alignment_score_sell', 'setup_state', 'entry_reason', 'spike_pct', 'spike_points', 'spike_threshold_used', 'spike_mode_used', 'signal_candidate', 'reject_reason', 'signal_fired'];
     const rows = [headers].concat(tickLog.map(function (r) {
       return headers.map(function (h) { return r[h] !== undefined ? r[h] : ''; });
     }));
@@ -1409,6 +1639,7 @@
       minIndicatorScore: 3,
       sameSideCooldownTicks: 5,
       chopHistThreshold: 0.0002,
+      entryProfile:      'balanced',
       macdTrendEpsilon:  0.00005,
       macdTrendLookback: 3,
       spikeMode:        'auto',
@@ -1444,6 +1675,8 @@
   function applyConfigToUI () {
     const strat = document.getElementById('tt-cfg-strategy-mode');
     if (strat) strat.value = cfg.strategyMode || 'indicator';
+    const ep = document.getElementById('tt-cfg-entry-profile');
+    if (ep) ep.value = cfg.entryProfile || 'balanced';
     const preset = document.getElementById('tt-cfg-indicator-preset');
     if (preset) preset.value = cfg.indicatorPreset || 'balanced';
     const ms = document.getElementById('tt-cfg-min-score');
@@ -1497,6 +1730,7 @@
     lastSignalTickIndex     = -999;
     lastSignalSide          = null;
     lastSignalSideTickIndex = -999;
+    pendingSetup            = null;
     console.log('[3Tick][watchdog] watchdog_recover_eval: eval state reset');
   }
 
