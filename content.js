@@ -17,8 +17,13 @@
   const RECONNECT_MAX   = 64000; // ms – reconnect delay cap
 
   let cfg = {
-    spikeThreshold: 0.30,  // minimum % price-move considered a spike
-    reversalTicks:  1,     // consecutive opposite-direction ticks to confirm reversal
+    spikeThreshold:   0.30,  // minimum % price-move considered a spike
+    reversalTicks:    1,     // consecutive opposite-direction ticks to confirm reversal
+    minSnapbackRatio: 0.5,   // reversal must retrace >= this fraction of spike distance
+    extremeLookback:  10,    // spike tip must be local high/low within last N ticks
+    cooldownTicks:    2,     // minimum ticks between new signals
+    minVolatilityPct: 0.03,  // skip signals when recent range is too flat (%)
+    debugSignals:     false, // log signal accept/reject reasons to console
   };
 
   // ── State ─────────────────────────────────────────────────────────────────
@@ -27,6 +32,7 @@
   let signals     = [];  // { type, price, time, result, ticksAfter, priceAfter }
   let wins        = 0;
   let losses      = 0;
+  let lastSignalTickIndex = -999; // tick buffer index of last fired signal (cooldown tracking)
 
   let ws             = null;
   let wsState        = 'disconnected';
@@ -87,6 +93,26 @@
           <div class="tt-config-row">
             <label>Reversal ticks</label>
             <input type="number" id="tt-cfg-rev" min="1" max="5" step="1" value="1">
+          </div>
+          <div class="tt-config-row">
+            <label>Snapback ratio (0–1)</label>
+            <input type="number" id="tt-cfg-snapback" min="0" max="1" step="0.05" value="0.5">
+          </div>
+          <div class="tt-config-row">
+            <label>Extreme lookback</label>
+            <input type="number" id="tt-cfg-lookback" min="1" max="50" step="1" value="10">
+          </div>
+          <div class="tt-config-row">
+            <label>Cooldown ticks</label>
+            <input type="number" id="tt-cfg-cooldown" min="0" max="20" step="1" value="2">
+          </div>
+          <div class="tt-config-row">
+            <label>Min volatility %</label>
+            <input type="number" id="tt-cfg-volpct" min="0" max="5" step="0.01" value="0.03">
+          </div>
+          <div class="tt-config-row">
+            <label>Debug signals</label>
+            <input type="checkbox" id="tt-cfg-debug">
           </div>
         </div>
         <button id="tt-export">⬇ Export CSV</button>
@@ -165,6 +191,30 @@
 
     document.getElementById('tt-cfg-rev').addEventListener('change', function () {
       cfg.reversalTicks = parseInt(this.value, 10) || 1;
+    });
+
+    document.getElementById('tt-cfg-snapback').addEventListener('change', function () {
+      const v = parseFloat(this.value);
+      cfg.minSnapbackRatio = (!isNaN(v) && v >= 0) ? v : 0.5;
+    });
+
+    document.getElementById('tt-cfg-lookback').addEventListener('change', function () {
+      const v = parseInt(this.value, 10);
+      cfg.extremeLookback = (!isNaN(v) && v >= 1) ? v : 10;
+    });
+
+    document.getElementById('tt-cfg-cooldown').addEventListener('change', function () {
+      const v = parseInt(this.value, 10);
+      cfg.cooldownTicks = (!isNaN(v) && v >= 0) ? v : 2;
+    });
+
+    document.getElementById('tt-cfg-volpct').addEventListener('change', function () {
+      const v = parseFloat(this.value);
+      cfg.minVolatilityPct = (!isNaN(v) && v >= 0) ? v : 0.03;
+    });
+
+    document.getElementById('tt-cfg-debug').addEventListener('change', function () {
+      cfg.debugSignals = this.checked;
     });
 
     document.getElementById('tt-export').addEventListener('click', exportCSV);
@@ -356,6 +406,12 @@
    *    move in the OPPOSITE direction from the spike.
    *  - BUY  signal: spike was DOWN  then reversal tick(s) move UP
    *  - SELL signal: spike was UP    then reversal tick(s) move DOWN
+   *
+   * Quality gates (applied after base checks):
+   *  1. Snapback strength  – reversal distance >= cfg.minSnapbackRatio * spike distance
+   *  2. Local extreme      – spike tip must be the local high/low in cfg.extremeLookback window
+   *  3. Volatility         – recent range must exceed cfg.minVolatilityPct %
+   *  4. Cooldown           – at least cfg.cooldownTicks ticks since last signal
    */
   function detectSignal () {
     const n = ticks.length;
@@ -366,28 +422,96 @@
     const spikeTo   = ticks[n - cfg.reversalTicks - 1].price;
     if (spikeFrom === 0) return;
     const spikePct  = Math.abs(spikeTo - spikeFrom) / spikeFrom * 100;
-    if (spikePct < cfg.spikeThreshold) return;
+    if (spikePct < cfg.spikeThreshold) {
+      if (cfg.debugSignals) console.log(`[3Tick][signal] rejected: spike too small ${spikePct.toFixed(4)}% < threshold ${cfg.spikeThreshold}`);
+      return;
+    }
 
-    const spikeDir = spikeTo > spikeFrom ? 1 : -1; // +1 = up spike, -1 = down spike
+    const spikeDir  = spikeTo > spikeFrom ? 1 : -1; // +1 = up spike, -1 = down spike
+    const spikeAbs  = Math.abs(spikeTo - spikeFrom);
 
     // Verify reversal ticks all move opposite to spike
     for (let i = 0; i < cfg.reversalTicks; i++) {
       const a = ticks[n - cfg.reversalTicks - 1 + i].price;
       const b = ticks[n - cfg.reversalTicks     + i].price;
       const dir = b > a ? 1 : b < a ? -1 : 0;
-      if (dir !== -spikeDir) return; // flat or wrong-direction ticks do not confirm reversal
+      if (dir !== -spikeDir) {
+        if (cfg.debugSignals) console.log(`[3Tick][signal] rejected: reversal tick wrong direction at i=${i}`);
+        return; // flat or wrong-direction ticks do not confirm reversal
+      }
+    }
+
+    // ── Gate 1: Snapback strength ─────────────────────────────────────────
+    const tipPrice        = spikeTo;
+    const latestPrice     = ticks[n - 1].price;
+    const reversalDistance = Math.abs(latestPrice - tipPrice);
+    if (spikeAbs > 0 && (reversalDistance / spikeAbs) < cfg.minSnapbackRatio) {
+      if (cfg.debugSignals) console.log(`[3Tick][signal] rejected: snapback ${(reversalDistance / spikeAbs).toFixed(3)} < ratio ${cfg.minSnapbackRatio}`);
+      return;
+    }
+
+    // ── Gate 2: Local extreme ─────────────────────────────────────────────
+    // Look back extremeLookback ticks around the spike window (excluding reversal ticks)
+    const lookEnd   = n - cfg.reversalTicks;
+    const lookStart = Math.max(0, lookEnd - cfg.extremeLookback);
+    const lookPrices = [];
+    for (let i = lookStart; i < lookEnd; i++) {
+      lookPrices.push(ticks[i].price);
+    }
+    if (lookPrices.length > 0) {
+      if (spikeDir === 1) {
+        // Up spike → SELL setup: spike tip must be >= local high
+        const localHigh = Math.max.apply(null, lookPrices);
+        if (tipPrice < localHigh) {
+          if (cfg.debugSignals) console.log(`[3Tick][signal] rejected: local-extreme (up spike tip ${tipPrice} < localHigh ${localHigh})`);
+          return;
+        }
+      } else {
+        // Down spike → BUY setup: spike tip must be <= local low
+        const localLow = Math.min.apply(null, lookPrices);
+        if (tipPrice > localLow) {
+          if (cfg.debugSignals) console.log(`[3Tick][signal] rejected: local-extreme (down spike tip ${tipPrice} > localLow ${localLow})`);
+          return;
+        }
+      }
+    }
+
+    // ── Gate 3: Volatility ────────────────────────────────────────────────
+    const volStart  = Math.max(0, n - cfg.extremeLookback);
+    const volPrices = [];
+    for (let i = volStart; i < n; i++) {
+      volPrices.push(ticks[i].price);
+    }
+    if (volPrices.length > 1) {
+      const refPrice = volPrices[0] || 1;
+      const volRange = (Math.max.apply(null, volPrices) - Math.min.apply(null, volPrices)) / refPrice * 100;
+      if (volRange < cfg.minVolatilityPct) {
+        if (cfg.debugSignals) console.log(`[3Tick][signal] rejected: volatility ${volRange.toFixed(4)}% < minVolatilityPct ${cfg.minVolatilityPct}`);
+        return;
+      }
+    }
+
+    // ── Gate 4: Cooldown ──────────────────────────────────────────────────
+    const ticksSinceLast = (n - 1) - lastSignalTickIndex;
+    if (ticksSinceLast < cfg.cooldownTicks) {
+      if (cfg.debugSignals) console.log(`[3Tick][signal] rejected: cooldown (${ticksSinceLast} ticks since last, need ${cfg.cooldownTicks})`);
+      return;
     }
 
     const sigType  = spikeDir === 1 ? 'SELL' : 'BUY';  // spike up → sell reversal; spike down → buy reversal
     const sigPrice = ticks[n - 1].price;
     const sigTime  = ticks[n - 1].time;
 
-    // Avoid duplicate signal at same timestamp/price
+    // Avoid duplicate signal at same timestamp
     if (signals.length && signals[signals.length - 1].time === sigTime) return;
+
+    lastSignalTickIndex = n - 1;
 
     const sig = { type: sigType, price: sigPrice, time: sigTime, result: 'PENDING', ticksAfter: [] };
     signals.push(sig);
     if (signals.length > 50) signals.shift();
+
+    if (cfg.debugSignals) console.log(`[3Tick][signal] ACCEPTED ${sigType} at price ${sigPrice} time ${sigTime}`);
 
     updateSignalsUI();
   }
