@@ -283,6 +283,16 @@
 }
 #tt-config-toggle:hover { color: #7ec8e3; }
 
+.tt-config-section-label {
+  font-size: 10px;
+  color: #7a8499;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 4px 0 2px;
+  border-top: 1px solid #2e3650;
+  margin-top: 2px;
+}
+
 /* ── Alert bar ── */
 #tt-alert {
   display: none;

@@ -18,6 +18,11 @@
   const TICK_LOG_MAX    = 5000;  // maximum in-memory tick log rows
 
   let cfg = {
+    // ── Strategy mode ──────────────────────────────────────────────────────
+    strategyMode:      'indicator', // 'indicator' | 'classic'
+    indicatorPreset:   'balanced',  // 'aggressive' | 'balanced' | 'conservative'
+    minIndicatorScore: 3,           // minimum combined indicator score to fire a signal (2–5)
+    // ── Classic spike settings (used when strategyMode === 'classic') ──────
     spikeMode:        'auto',  // 'auto' | 'percent' | 'points'
     spikeThreshold:   0.001,   // minimum % price-move considered a spike (permissive default for calibration)
     minSpikePoints:   0.1,     // minimum absolute point-move for spike (used in 'points'/'auto' mode)
@@ -93,40 +98,64 @@
         <button id="tt-config-toggle">⚙ settings</button>
         <div id="tt-config">
           <div class="tt-config-row">
-            <label>Spike mode</label>
-            <select id="tt-cfg-spike-mode">
-              <option value="auto">auto</option>
-              <option value="percent">percent</option>
-              <option value="points">points</option>
+            <label>Strategy mode</label>
+            <select id="tt-cfg-strategy-mode">
+              <option value="indicator">Indicator</option>
+              <option value="classic">Classic</option>
             </select>
           </div>
-          <div class="tt-config-row">
-            <label>Spike % threshold</label>
-            <input type="number" id="tt-cfg-spike" min="0.0001" max="5" step="0.0001" value="0.001">
+          <div id="tt-indicator-controls">
+            <div class="tt-config-row">
+              <label>Indicator preset</label>
+              <select id="tt-cfg-indicator-preset">
+                <option value="aggressive">Aggressive (≥2)</option>
+                <option value="balanced">Balanced (≥3)</option>
+                <option value="conservative">Conservative (≥4)</option>
+              </select>
+            </div>
+            <div class="tt-config-row">
+              <label>Min indicator score (2–5)</label>
+              <input type="number" id="tt-cfg-min-score" min="2" max="5" step="1" value="3">
+            </div>
           </div>
-          <div class="tt-config-row">
-            <label>Min spike points</label>
-            <input type="number" id="tt-cfg-spike-points" min="0" max="100" step="0.01" value="0.1">
-          </div>
-          <div class="tt-config-row">
-            <label>Reversal ticks</label>
-            <input type="number" id="tt-cfg-rev" min="1" max="5" step="1" value="1">
-          </div>
-          <div class="tt-config-row">
-            <label>Snapback ratio (0–1)</label>
-            <input type="number" id="tt-cfg-snapback" min="0" max="1" step="0.05" value="0.2">
-          </div>
-          <div class="tt-config-row">
-            <label>Extreme lookback</label>
-            <input type="number" id="tt-cfg-lookback" min="1" max="50" step="1" value="4">
-          </div>
-          <div class="tt-config-row">
-            <label>Cooldown ticks</label>
-            <input type="number" id="tt-cfg-cooldown" min="0" max="20" step="1" value="1">
-          </div>
-          <div class="tt-config-row">
-            <label>Min volatility %</label>
-            <input type="number" id="tt-cfg-volpct" min="0" max="5" step="0.001" value="0.005">
+          <div id="tt-classic-controls">
+            <div class="tt-config-section-label">Classic spike settings</div>
+            <div class="tt-config-row">
+              <label>Spike mode</label>
+              <select id="tt-cfg-spike-mode">
+                <option value="auto">auto</option>
+                <option value="percent">percent</option>
+                <option value="points">points</option>
+              </select>
+            </div>
+            <div class="tt-config-row">
+              <label>Spike % threshold</label>
+              <input type="number" id="tt-cfg-spike" min="0.0001" max="5" step="0.0001" value="0.001">
+            </div>
+            <div class="tt-config-row">
+              <label>Min spike points</label>
+              <input type="number" id="tt-cfg-spike-points" min="0" max="100" step="0.01" value="0.1">
+            </div>
+            <div class="tt-config-row">
+              <label>Reversal ticks</label>
+              <input type="number" id="tt-cfg-rev" min="1" max="5" step="1" value="1">
+            </div>
+            <div class="tt-config-row">
+              <label>Snapback ratio (0–1)</label>
+              <input type="number" id="tt-cfg-snapback" min="0" max="1" step="0.05" value="0.2">
+            </div>
+            <div class="tt-config-row">
+              <label>Extreme lookback</label>
+              <input type="number" id="tt-cfg-lookback" min="1" max="50" step="1" value="4">
+            </div>
+            <div class="tt-config-row">
+              <label>Cooldown ticks</label>
+              <input type="number" id="tt-cfg-cooldown" min="0" max="20" step="1" value="1">
+            </div>
+            <div class="tt-config-row">
+              <label>Min volatility %</label>
+              <input type="number" id="tt-cfg-volpct" min="0" max="5" step="0.001" value="0.005">
+            </div>
           </div>
           <div class="tt-config-row">
             <label>Debug signals</label>
@@ -187,6 +216,13 @@
   }
 
   // ── Button bindings ───────────────────────────────────────────────────────
+  function syncStrategyModeUI (mode) {
+    const classicEl   = document.getElementById('tt-classic-controls');
+    const indicatorEl = document.getElementById('tt-indicator-controls');
+    if (classicEl)   classicEl.style.display   = mode === 'classic'    ? '' : 'none';
+    if (indicatorEl) indicatorEl.style.display = mode === 'indicator'  ? '' : 'none';
+  }
+
   function bindButtons (el) {
     document.getElementById('tt-min-btn').addEventListener('click', function () {
       el.classList.toggle('tt-minimized');
@@ -205,6 +241,29 @@
       cfg_el.classList.toggle('tt-open');
     });
 
+    // ── Indicator-mode controls ──────────────────────────────────────────
+    document.getElementById('tt-cfg-strategy-mode').addEventListener('change', function () {
+      cfg.strategyMode = this.value;
+      syncStrategyModeUI(cfg.strategyMode);
+      saveCfg();
+    });
+
+    document.getElementById('tt-cfg-indicator-preset').addEventListener('change', function () {
+      cfg.indicatorPreset = this.value;
+      const presetScores = { aggressive: 2, balanced: 3, conservative: 4 };
+      cfg.minIndicatorScore = presetScores[cfg.indicatorPreset] || 3;
+      const scoreEl = document.getElementById('tt-cfg-min-score');
+      if (scoreEl) scoreEl.value = cfg.minIndicatorScore;
+      saveCfg();
+    });
+
+    document.getElementById('tt-cfg-min-score').addEventListener('change', function () {
+      const v = parseInt(this.value, 10);
+      cfg.minIndicatorScore = (!isNaN(v) && v >= 2 && v <= 5) ? v : 3;
+      saveCfg();
+    });
+
+    // ── Classic spike controls ───────────────────────────────────────────
     document.getElementById('tt-cfg-spike-mode').addEventListener('change', function () {
       cfg.spikeMode = this.value;
       saveCfg();
@@ -423,23 +482,39 @@
 
     // Append to tick log when logging is active
     if (tickLogging) {
+      const isIndicatorMode = (cfg.strategyMode || 'indicator') === 'indicator';
       const row = {
         epoch:            time,
         iso_time:         new Date(time * 1000).toISOString(),
         symbol:           resolvedSymbol || '',
         price:            price,
-        spike_pct:        (detection && typeof detection.spikePct === 'number')
+        strategy_mode:    cfg.strategyMode || 'indicator',
+        // indicator-mode fields
+        buy_score:        (isIndicatorMode && detection && detection.buyScore  != null) ? detection.buyScore  : '',
+        sell_score:       (isIndicatorMode && detection && detection.sellScore != null) ? detection.sellScore : '',
+        score_components: isIndicatorMode && detection
+          ? (detection.fired
+              ? (detection.candidate === 'BUY' ? detection.buyComponents : detection.sellComponents)
+              : (detection.buyScore >= detection.sellScore ? detection.buyComponents : detection.sellComponents))
+          : '',
+        indicator_reason: isIndicatorMode && detection
+          ? (detection.fired
+              ? 'accepted:' + detection.candidate
+              : 'rejected:' + (detection.rejectReason || ''))
+          : '',
+        // classic-mode fields
+        spike_pct:        (!isIndicatorMode && detection && typeof detection.spikePct === 'number')
                             ? detection.spikePct.toFixed(5) : '',
-        spike_points:     (detection && typeof detection.spikeAbs === 'number')
+        spike_points:     (!isIndicatorMode && detection && typeof detection.spikeAbs === 'number')
                             ? detection.spikeAbs.toFixed(5) : '',
-        spike_threshold_used: (detection && typeof detection.spikeAbs === 'number')
+        spike_threshold_used: (!isIndicatorMode && detection && typeof detection.spikeAbs === 'number')
                             ? (detection.spikeMode === 'percent'
                                 ? cfg.spikeThreshold + '%'
                                 : detection.spikeMode === 'points'
                                 ? cfg.minSpikePoints + 'pts'
                                 : cfg.minSpikePoints + 'pts/' + cfg.spikeThreshold + '%')
                             : '',
-        spike_mode_used:  (detection && detection.spikeMode) ? detection.spikeMode : '',
+        spike_mode_used:  (!isIndicatorMode && detection && detection.spikeMode) ? detection.spikeMode : '',
         signal_candidate: (detection && detection.candidate) ? detection.candidate : '',
         reject_reason:    (detection && detection.rejectReason) ? detection.rejectReason : '',
         signal_fired:     detection ? detection.fired : false,
@@ -493,8 +568,15 @@
    *  2. Local extreme      – spike tip must be the local high/low in cfg.extremeLookback window
    *  3. Volatility         – recent range must exceed cfg.minVolatilityPct %
    *  4. Cooldown           – at least cfg.cooldownTicks ticks since last signal
+   *
+   * When cfg.strategyMode === 'indicator', delegates to detectSignalIndicator() instead.
    */
   function detectSignal () {
+    // Route to indicator mode when configured
+    if ((cfg.strategyMode || 'indicator') === 'indicator') {
+      return detectSignalIndicator();
+    }
+
     const n = ticks.length;
     if (n < cfg.reversalTicks + 2) return null;
 
@@ -706,6 +788,280 @@
     return deduped;
   }
 
+  // ── Indicator helper functions ────────────────────────────────────────────
+
+  // Exponential Moving Average; returns array of same length (NaN until enough data)
+  function calcEMA (period, data) {
+    const k = 2 / (period + 1);
+    const result = [];
+    let ema = NaN;
+    for (let i = 0; i < data.length; i++) {
+      if (isNaN(ema)) {
+        if (i + 1 === period) {
+          let sum = 0;
+          for (let j = 0; j < period; j++) sum += data[j];
+          ema = sum / period;
+        }
+      } else {
+        ema = data[i] * k + ema * (1 - k);
+      }
+      result.push(isNaN(ema) ? NaN : ema);
+    }
+    return result;
+  }
+
+  // Simple Moving Average; returns array of same length (NaN until enough data)
+  function calcSMA (period, data) {
+    const result = [];
+    for (let i = 0; i < data.length; i++) {
+      if (i + 1 < period) {
+        result.push(NaN);
+      } else {
+        let sum = 0;
+        for (let j = i - period + 1; j <= i; j++) sum += data[j];
+        result.push(sum / period);
+      }
+    }
+    return result;
+  }
+
+  // MACD(12,26,9) using an array of close prices
+  // Returns null if insufficient data, otherwise { macdLine, signalLine, histogram, histogramRising, macdAboveSignal }
+  function calcMACD (closes) {
+    if (closes.length < 26) return null;
+    const ema12arr = calcEMA(12, closes);
+    const ema26arr = calcEMA(26, closes);
+    const macdArr  = [];
+    for (let i = 0; i < closes.length; i++) {
+      const v12 = ema12arr[i], v26 = ema26arr[i];
+      macdArr.push((isNaN(v12) || isNaN(v26)) ? NaN : v12 - v26);
+    }
+    const validMacd = macdArr.filter(function (v) { return !isNaN(v); });
+    if (validMacd.length < 9) return null;
+    const sigArr = calcEMA(9, validMacd);
+    const n = validMacd.length;
+    const latestMacd  = validMacd[n - 1];
+    const prevMacd    = validMacd[n - 2];
+    const latestSig   = sigArr[sigArr.length - 1];
+    const prevSig     = sigArr[sigArr.length - 2];
+    if (isNaN(latestSig)) return null;
+    const histogram     = latestMacd - latestSig;
+    const prevHistogram = isNaN(prevSig) ? histogram : (prevMacd - prevSig);
+    return {
+      macdLine:        latestMacd,
+      signalLine:      latestSig,
+      histogram,
+      histogramRising: histogram > prevHistogram,
+      macdAboveSignal: latestMacd > latestSig,
+    };
+  }
+
+  // RSI(14) using an array of close prices
+  // Returns null if insufficient data, otherwise { value, prev, rising }
+  function calcRSI (closes) {
+    const period = 14;
+    if (closes.length < period + 2) return null;
+    const slice = closes.slice(-Math.min(closes.length, 60));
+    function computeRSI (arr) {
+      let avgGain = 0, avgLoss = 0;
+      for (let i = 1; i <= period; i++) {
+        const diff = arr[i] - arr[i - 1];
+        if (diff > 0) avgGain += diff;
+        else          avgLoss += Math.abs(diff);
+      }
+      avgGain /= period;
+      avgLoss /= period;
+      for (let i = period + 1; i < arr.length; i++) {
+        const diff = arr[i] - arr[i - 1];
+        const g = diff > 0 ? diff : 0;
+        const l = diff < 0 ? Math.abs(diff) : 0;
+        avgGain = (avgGain * (period - 1) + g) / period;
+        avgLoss = (avgLoss * (period - 1) + l) / period;
+      }
+      const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+      return 100 - 100 / (1 + rs);
+    }
+    const current = computeRSI(slice);
+    const prev    = computeRSI(slice.slice(0, -1));
+    return { value: current, prev, rising: current > prev };
+  }
+
+  // Bollinger Bands(14, 2) with EMA basis using an array of close prices
+  // Returns null if insufficient data, otherwise { basis, upper, lower }
+  function calcBollinger (closes) {
+    const period = 14;
+    const mult   = 2;
+    if (closes.length < period) return null;
+    const slice  = closes.slice(-Math.min(closes.length, period * 3));
+    const emaArr = calcEMA(period, slice);
+    const basis  = emaArr[emaArr.length - 1];
+    if (isNaN(basis)) return null;
+    const last14   = closes.slice(-period);
+    const mean     = last14.reduce(function (a, b) { return a + b; }, 0) / period;
+    const variance = last14.reduce(function (a, b) { return a + Math.pow(b - mean, 2); }, 0) / period;
+    const stddev   = Math.sqrt(variance);
+    return { basis, upper: basis + mult * stddev, lower: basis - mult * stddev };
+  }
+
+  // MA(4) using recent tick prices
+  // Returns null if insufficient data, otherwise { value, rising }
+  function calcMA4 (prices) {
+    const period = 4;
+    if (prices.length < period) return null;
+    const cur  = prices.slice(-period).reduce(function (a, b) { return a + b; }, 0) / period;
+    const prev = prices.length >= period + 1
+      ? prices.slice(-period - 1, -1).reduce(function (a, b) { return a + b; }, 0) / period
+      : cur;
+    return { value: cur, rising: cur > prev };
+  }
+
+  // Stochastic Momentum proxy (10,3,3) using candle data
+  // Note: Exact Stch Mtm internals are approximated here as Stochastic Oscillator
+  // with smoothed %K and %D; logged in debug as inferred calculation.
+  // Returns null if insufficient data, otherwise { k, d, kAboveD, kRising }
+  function calcStochMtm (candleData) {
+    const periodK = 10;
+    const smoothK = 3;
+    const smoothD = 3;
+    const needed  = periodK + smoothK + smoothD;
+    if (candleData.length < needed) return null;
+    const kRaw = [];
+    for (let i = periodK - 1; i < candleData.length; i++) {
+      const window = candleData.slice(i - periodK + 1, i + 1);
+      const lowestLow   = Math.min.apply(null, window.map(function (c) { return c.low; }));
+      const highestHigh = Math.max.apply(null, window.map(function (c) { return c.high; }));
+      const range = highestHigh - lowestLow;
+      kRaw.push(range > 0 ? (candleData[i].close - lowestLow) / range * 100 : 50);
+    }
+    if (kRaw.length < smoothK + smoothD) return null;
+    const kSmooth = calcSMA(smoothK, kRaw);
+    const validK  = kSmooth.filter(function (v) { return !isNaN(v); });
+    if (validK.length < smoothD) return null;
+    const dSmooth   = calcSMA(smoothD, validK);
+    const latestK   = validK[validK.length - 1];
+    const prevK     = validK.length >= 2 ? validK[validK.length - 2] : latestK;
+    const latestD   = dSmooth[dSmooth.length - 1];
+    if (isNaN(latestD)) return null;
+    if (cfg.debugSignals) console.log('[3Tick][indicator] StochMtm proxy (inferred calc): K=' + latestK.toFixed(2) + ' D=' + latestD.toFixed(2));
+    return { k: latestK, d: latestD, kAboveD: latestK > latestD, kRising: latestK > prevK };
+  }
+
+  // Score all five indicators for current market state
+  // Returns { buyScore, sellScore, buyComponents, sellComponents, ...rawIndicators }
+  function scoreIndicators () {
+    const closes      = candles.map(function (c) { return c.close; });
+    const tickPrices  = ticks.map(function (t) { return t.price; });
+    const n           = tickPrices.length;
+    const currentPrice = n > 0 ? tickPrices[n - 1] : (closes.length ? closes[closes.length - 1] : 0);
+    const prevPrice    = n > 1 ? tickPrices[n - 2] : currentPrice;
+
+    const macd  = calcMACD(closes);
+    const rsi   = calcRSI(closes);
+    const bb    = calcBollinger(closes);
+    const ma4   = calcMA4(tickPrices);
+    const stoch = calcStochMtm(candles);
+
+    let buyScore  = 0;
+    let sellScore = 0;
+    const buyParts  = [];
+    const sellParts = [];
+
+    // 1. Bollinger Bands: price near lower/mid BB and bouncing up (BUY) or near upper/mid and bouncing down (SELL)
+    if (bb) {
+      if (currentPrice <= bb.basis && currentPrice > prevPrice) { buyScore++;  buyParts.push('BB↑'); }
+      if (currentPrice >= bb.basis && currentPrice < prevPrice) { sellScore++; sellParts.push('BB↓'); }
+    }
+
+    // 2. MA(4): slope up or price above MA (BUY); slope down AND price below MA (SELL)
+    if (ma4) {
+      if (ma4.rising || currentPrice > ma4.value) { buyScore++;  buyParts.push('MA4↑'); }
+      if (!ma4.rising && currentPrice < ma4.value) { sellScore++; sellParts.push('MA4↓'); }
+    }
+
+    // 3. MACD(12,26,9): histogram rising or MACD above signal (BUY); both falling AND below signal (SELL)
+    if (macd) {
+      if (macd.histogramRising || macd.macdAboveSignal)    { buyScore++;  buyParts.push('MACD↑'); }
+      if (!macd.histogramRising && !macd.macdAboveSignal)  { sellScore++; sellParts.push('MACD↓'); }
+    }
+
+    // 4. RSI(14): rising (BUY); falling (SELL)
+    if (rsi) {
+      if (rsi.rising)  { buyScore++;  buyParts.push('RSI↑'); }
+      if (!rsi.rising) { sellScore++; sellParts.push('RSI↓'); }
+    }
+
+    // 5. Stochastic Momentum: K above D or K rising (BUY); K below D AND K falling (SELL)
+    if (stoch) {
+      if (stoch.kAboveD || stoch.kRising)   { buyScore++;  buyParts.push('STCH↑'); }
+      if (!stoch.kAboveD && !stoch.kRising) { sellScore++; sellParts.push('STCH↓'); }
+    }
+
+    return {
+      buyScore, sellScore,
+      buyComponents:  buyParts.join('+'),
+      sellComponents: sellParts.join('+'),
+      macd, rsi, bb, ma4, stoch,
+    };
+  }
+
+  // ── Indicator-mode signal detection ──────────────────────────────────────
+  function detectSignalIndicator () {
+    const n = ticks.length;
+    if (n < 5) return null;
+
+    const ind = scoreIndicators();
+    const { buyScore, sellScore, buyComponents, sellComponents } = ind;
+
+    let candidate  = null;
+    let score      = 0;
+    let components = '';
+    const minScore = cfg.minIndicatorScore != null ? cfg.minIndicatorScore : 3;
+
+    if (buyScore > sellScore && buyScore >= minScore) {
+      candidate  = 'BUY';
+      score      = buyScore;
+      components = buyComponents;
+    } else if (sellScore > buyScore && sellScore >= minScore) {
+      candidate  = 'SELL';
+      score      = sellScore;
+      components = sellComponents;
+    }
+
+    const baseResult = { buyScore, sellScore, buyComponents, sellComponents };
+
+    if (!candidate) {
+      const reason = 'buy=' + buyScore + ' sell=' + sellScore + ' need>=' + minScore;
+      if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: score too low – ' + reason);
+      return Object.assign(baseResult, { candidate: null, rejectReason: 'score_threshold', fired: false });
+    }
+
+    // Cooldown guard
+    const ticksSinceLast = (n - 1) - lastSignalTickIndex;
+    if (ticksSinceLast < cfg.cooldownTicks) {
+      if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: cooldown (' + ticksSinceLast + ' ticks since last, need ' + cfg.cooldownTicks + ')');
+      return Object.assign(baseResult, { candidate, rejectReason: 'cooldown', fired: false });
+    }
+
+    const sigPrice = ticks[n - 1].price;
+    const sigTime  = ticks[n - 1].time;
+
+    // Duplicate timestamp guard
+    if (signals.length && signals[signals.length - 1].time === sigTime) {
+      return Object.assign(baseResult, { candidate, rejectReason: 'duplicate', fired: false });
+    }
+
+    lastSignalTickIndex = n - 1;
+
+    const sig = { type: candidate, price: sigPrice, time: sigTime, result: 'PENDING', ticksAfter: [] };
+    signals.push(sig);
+    if (signals.length > 50) signals.shift();
+
+    if (cfg.debugSignals) console.log('[3Tick][indicator] ACCEPTED ' + candidate + ' score=' + score + ' (' + components + ') at price ' + sigPrice + ' time ' + sigTime);
+
+    updateSignalsUI();
+    return Object.assign(baseResult, { candidate, rejectReason: null, fired: true });
+  }
+
   // ── UI helpers ────────────────────────────────────────────────────────────
   function updateWinsLossesUI () {
     const we = document.getElementById('tt-wins');
@@ -777,7 +1133,7 @@
       showAlert('No tick log data to export. Start logging first.');
       return;
     }
-    const headers = ['epoch', 'iso_time', 'symbol', 'price', 'spike_pct', 'spike_points', 'spike_threshold_used', 'spike_mode_used', 'signal_candidate', 'reject_reason', 'signal_fired'];
+    const headers = ['epoch', 'iso_time', 'symbol', 'price', 'strategy_mode', 'buy_score', 'sell_score', 'score_components', 'indicator_reason', 'spike_pct', 'spike_points', 'spike_threshold_used', 'spike_mode_used', 'signal_candidate', 'reject_reason', 'signal_fired'];
     const rows = [headers].concat(tickLog.map(function (r) {
       return headers.map(function (h) { return r[h] !== undefined ? r[h] : ''; });
     }));
@@ -803,6 +1159,9 @@
   // ── Config persistence ────────────────────────────────────────────────────
   function getDefaultCfg () {
     return {
+      strategyMode:      'indicator',
+      indicatorPreset:   'balanced',
+      minIndicatorScore: 3,
       spikeMode:        'auto',
       spikeThreshold:   0.001,
       minSpikePoints:   0.1,
@@ -834,6 +1193,12 @@
 
   // ── Apply loaded config values to UI inputs ───────────────────────────────
   function applyConfigToUI () {
+    const strat = document.getElementById('tt-cfg-strategy-mode');
+    if (strat) strat.value = cfg.strategyMode || 'indicator';
+    const preset = document.getElementById('tt-cfg-indicator-preset');
+    if (preset) preset.value = cfg.indicatorPreset || 'balanced';
+    const ms = document.getElementById('tt-cfg-min-score');
+    if (ms) ms.value = cfg.minIndicatorScore != null ? cfg.minIndicatorScore : 3;
     const sm  = document.getElementById('tt-cfg-spike-mode');
     if (sm)  sm.value     = cfg.spikeMode || 'auto';
     const s   = document.getElementById('tt-cfg-spike');
@@ -852,6 +1217,7 @@
     if (vp)  vp.value    = cfg.minVolatilityPct;
     const dbg = document.getElementById('tt-cfg-debug');
     if (dbg) dbg.checked = cfg.debugSignals;
+    syncStrategyModeUI(cfg.strategyMode || 'indicator');
   }
 
   // ── Init ──────────────────────────────────────────────────────────────────
