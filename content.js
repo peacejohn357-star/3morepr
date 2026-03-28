@@ -10,7 +10,7 @@
   const WS_URL_FALLBACK = 'wss://ws.deriv.com/websockets/v3?app_id=1089';
   const FALLBACK_AFTER  = 3;     // consecutive failures before trying fallback endpoint
   const TICK_BUF        = 200;
-  const SPEED_BUF       = 1000;   // Buffer for calculating speed percentiles
+  const SPEED_BUF       = 100;   // Buffer reduced to 100 for micro-timing sensitivity
   const RECONNECT_BASE  = 4000;  // ms – initial reconnect delay
   const RECONNECT_MAX   = 64000; // ms – reconnect delay cap
   const SESSION_HISTORY_CAP    = 5000;  // maximum full-session trade history for CSV export
@@ -28,7 +28,7 @@
   let cfg = {
     tickSize:          0.1,         // Step Index 100 minimum price movement
     strategyMode:      'hybrid',    // 'momentum' | 'reversal' | 'structural' | 'hybrid'
-    epsilon:           0.015,       // threshold for "delta_change ≈ 0"
+    epsilon:           0.1,         // threshold for "delta_change ≈ 0" in price steps
     // ── Real-trade execution settings ──────────────────────────────────────
     realTradeEnabled: false,   // master toggle for real trade execution
     realTimeoutMs:    40000,   // ms – wait for close confirmation before RECOVERY
@@ -43,6 +43,8 @@
   let speedHistory = []; // [absSpeed, ...]
   let sHigh       = 0;
   let sLow        = 0;
+  let speedMean   = 0;
+  let speedStd    = 0;
   let signals     = [];  // { type, price, time, result, ticksAfter, priceAfter, confidence, strategy }
   let sessionTradesAll = []; // full session trade history for CSV export
   let wins        = 0;
@@ -113,6 +115,10 @@
           <span class="tt-val" id="tt-speed-stats">0.00 / 0.00</span>
         </div>
         <div class="tt-row">
+          <span class="tt-label">Mean / Std</span>
+          <span class="tt-val" id="tt-speed-dist">0.00 / 0.00</span>
+        </div>
+        <div class="tt-row">
           <span class="tt-label">Session W/L</span>
           <span class="tt-val">
             <span class="tt-wins"   id="tt-wins">0</span>
@@ -157,8 +163,8 @@
             </select>
           </div>
           <div class="tt-config-row">
-            <label>Epsilon (ε)</label>
-            <input type="number" id="tt-cfg-epsilon" min="0" max="0.1" step="0.001" value="0.015">
+            <label>Epsilon (steps)</label>
+            <input type="number" id="tt-cfg-epsilon" min="0" max="1" step="0.01" value="0.1">
           </div>
           <div class="tt-config-row">
             <label>Debug signals</label>
@@ -237,7 +243,7 @@
       saveCfg();
     });
     document.getElementById('tt-cfg-epsilon').addEventListener('change', function () {
-      cfg.epsilon = parseFloat(this.value) || 0.015;
+      cfg.epsilon = parseFloat(this.value) || 0.1;
       saveCfg();
     });
     document.getElementById('tt-cfg-debug').addEventListener('change', function () {
@@ -339,11 +345,23 @@
   function calculatePercentiles() {
     if (speedHistory.length < 10) return;
     const sorted = speedHistory.slice().sort((a, b) => a - b);
-    sLow  = sorted[Math.floor(sorted.length * 0.3)];
-    sHigh = sorted[Math.floor(sorted.length * 0.7)];
+    const p30 = sorted[Math.floor(sorted.length * 0.3)];
+    const p70 = sorted[Math.floor(sorted.length * 0.7)];
+
+    // Mean and Std
+    const sum = speedHistory.reduce((a, b) => a + b, 0);
+    speedMean = sum / speedHistory.length;
+    const sqDiff = speedHistory.map(v => Math.pow(v - speedMean, 2));
+    speedStd = Math.sqrt(sqDiff.reduce((a, b) => a + b, 0) / speedHistory.length);
+
+    // Hybrid Thresholds: Handles bursty distributions better
+    sHigh = Math.max(p70, speedMean + speedStd);
+    sLow  = Math.min(p30, Math.max(0, speedMean - speedStd));
 
     const statsEl = document.getElementById('tt-speed-stats');
     if (statsEl) statsEl.textContent = `${sLow.toFixed(4)} / ${sHigh.toFixed(4)}`;
+    const distEl = document.getElementById('tt-speed-dist');
+    if (distEl) distEl.textContent = `${speedMean.toFixed(4)} / ${speedStd.toFixed(4)}`;
   }
 
   // ── Tick handling ─────────────────────────────────────────────────────────
@@ -359,6 +377,8 @@
     const deltaSteps = delta / 0.1;
     const direction = delta > 0 ? 1 : (delta < 0 ? -1 : 0);
     const deltaTime = prevTick ? (now - prevTick.receivedAt) : 1000;
+
+    // speed_normalized = delta_steps / delta_time_ms
     const speed = deltaTime > 0 ? deltaSteps / deltaTime : 0;
     const absSpeed = Math.abs(speed);
     const lastDigit = Math.floor(Math.round(price * 100) / 10) % 10;
@@ -409,88 +429,83 @@
     let confidence = 0;
     let rejectReason = '';
 
-    // ────────────────────────────────────────────────────────────────────────
-    if (mode === 'momentum') {
-      // ✅ BUY
-      if (t0.direction === 1 && t0.upStreak <= 3 && t0.deltaChange > 0 && t0.speed >= sHigh && [0, 6].includes(t0.lastDigit)) {
-        candidate = 'BUY'; confidence = 80;
-      }
-      // ✅ SELL
-      else if (t0.direction === -1 && t0.downStreak <= 3 && t0.deltaChange < 0 && Math.abs(t0.speed) >= sHigh && [2, 8].includes(t0.lastDigit)) {
-        candidate = 'SELL'; confidence = 80;
-      }
-      // ❌ NO TRADE
-      if (candidate) {
-          if (Math.max(t0.upStreak, t0.downStreak) >= 5) { candidate = null; rejectReason = 'streak_too_high'; }
-          else if (t0.absSpeed <= sHigh) { candidate = null; rejectReason = 'speed_not_high'; } // sHigh is top 30%
-          else if (Math.abs(t0.deltaChange) < eps) { candidate = null; rejectReason = 'delta_change_low'; }
-      }
-    }
-    // ────────────────────────────────────────────────────────────────────────
-    else if (mode === 'reversal') {
-      // ✅ BUY
-      if (t0.direction === -1 && t0.downStreak >= 5 && t0.absSpeed <= sLow && t0.deltaChange >= 0 && [0, 5].includes(t0.lastDigit)) {
-        candidate = 'BUY'; confidence = 85;
-      }
-      // ✅ SELL
-      else if (t0.direction === 1 && t0.upStreak >= 5 && t0.absSpeed <= sLow && t0.deltaChange <= 0 && [3, 7].includes(t0.lastDigit)) {
-        candidate = 'SELL'; confidence = 85;
-      }
-      // ❌ NO TRADE
-      if (candidate) {
-          if (t0.absSpeed >= sHigh) { candidate = null; rejectReason = 'speed_too_high'; }
-          else if (Math.max(t0.upStreak, t0.downStreak) < 5) { candidate = null; rejectReason = 'streak_too_low'; }
-          else if (candidate === 'BUY' ? t0.deltaChange < 0 : t0.deltaChange > 0) { candidate = null; rejectReason = 'momentum_increasing'; }
-      }
-    }
-    // ────────────────────────────────────────────────────────────────────────
-    else if (mode === 'structural') {
-      // ✅ BUY
-      if ([0, 5, 6].includes(t0.lastDigit) && t0.deltaChange >= 0) {
-        candidate = 'BUY'; confidence = 90;
-      }
-      // ✅ SELL
-      else if ([2, 3, 8].includes(t0.lastDigit) && t0.deltaChange <= 0) {
-        candidate = 'SELL'; confidence = 90;
-      }
-      // ❌ NO TRADE
-      if (candidate) {
-          if ([1, 4, 7, 9].includes(t0.lastDigit)) { candidate = null; rejectReason = 'digit_excluded'; }
-          else if (Math.abs(t0.deltaChange) < eps) { candidate = null; rejectReason = 'delta_change_low'; }
-      }
-    }
-    // ────────────────────────────────────────────────────────────────────────
-    else if (mode === 'hybrid') {
-        // ✅ BUY
-        if ([0, 5, 6].includes(t0.lastDigit) && t0.deltaChange > 0 && t0.upStreak <= 3) {
-            candidate = 'BUY'; confidence = 95;
+    // Streak Zones: 0–2 → EARLY, 3–4 → NO TRADE, ≥5 → LATE
+    const currentStreak = Math.max(t0.upStreak, t0.downStreak);
+    const isEarly = currentStreak >= 0 && currentStreak <= 2;
+    const isLate  = currentStreak >= 5;
+    const isNoTradeStreak = currentStreak === 3 || currentStreak === 4;
+
+    // Momentum Change: Accelerating/Decelerating/Neutral
+    const isAccelerating = t0.deltaChange > eps;
+    const isDecelerating = t0.deltaChange < -eps;
+    const isNeutralMomentum = Math.abs(t0.deltaChange) <= eps;
+
+    // Digit Filters (Bias only)
+    const buyDigits = [0, 5, 6];
+    const sellDigits = [2, 3, 8];
+    const buyDigitBias = buyDigits.includes(t0.lastDigit);
+    const sellDigitBias = sellDigits.includes(t0.lastDigit);
+
+    // ── Strategy Priority: 1. Structural, 2. Momentum, 3. Reversal ──
+
+    // 1. Structural (Base Layer)
+    if (buyDigitBias && t0.deltaChange >= 0) {
+        if (mode === 'structural' || mode === 'hybrid') {
+            candidate = 'BUY'; confidence = 70;
+            if (isNeutralMomentum) { candidate = null; rejectReason = 'neutral_momentum'; }
         }
-        // ✅ SELL
-        else if ([2, 3, 8].includes(t0.lastDigit) && t0.deltaChange < 0 && t0.downStreak <= 3) {
-            candidate = 'SELL'; confidence = 95;
+    } else if (sellDigitBias && t0.deltaChange <= 0) {
+        if (mode === 'structural' || mode === 'hybrid') {
+            candidate = 'SELL'; confidence = 70;
+            if (isNeutralMomentum) { candidate = null; rejectReason = 'neutral_momentum'; }
         }
-        // ❌ NO TRADE
-        if (candidate) {
-            if (Math.max(t0.upStreak, t0.downStreak) >= 5) { candidate = null; rejectReason = 'streak_too_high'; }
-            else if (Math.abs(t0.deltaChange) < eps) { candidate = null; rejectReason = 'delta_change_low'; }
-            else if (t0.absSpeed > sLow && t0.absSpeed < sHigh) { candidate = null; rejectReason = 'speed_mid_range'; }
+    }
+
+    // 2. Momentum (Aggressive)
+    if (!candidate || mode === 'momentum') {
+        if (t0.direction === 1 && isEarly && isAccelerating && t0.absSpeed >= sHigh) {
+            candidate = 'BUY'; confidence = 85;
+            if (!buyDigitBias) confidence -= 10; // Digit as boost
+        } else if (t0.direction === -1 && isEarly && isDecelerating && t0.absSpeed >= sHigh) {
+            candidate = 'SELL'; confidence = 85;
+            if (!sellDigitBias) confidence -= 10;
         }
+
+        if (mode === 'momentum' && candidate) {
+            if (isNoTradeStreak || isLate) { candidate = null; rejectReason = 'streak_not_early'; }
+            else if (t0.absSpeed < sHigh) { candidate = null; rejectReason = 'speed_not_high'; }
+            else if (isNeutralMomentum) { candidate = null; rejectReason = 'momentum_neutral'; }
+        }
+    }
+
+    // 3. Reversal (Exhaustion)
+    if ((!candidate || mode === 'reversal') && isLate) {
+        if (t0.direction === -1 && t0.absSpeed <= sLow && t0.deltaChange >= 0) {
+            candidate = 'BUY'; confidence = 75;
+            if (buyDigitBias) confidence += 10;
+        } else if (t0.direction === 1 && t0.absSpeed <= sLow && t0.deltaChange <= 0) {
+            candidate = 'SELL'; confidence = 75;
+            if (sellDigitBias) confidence += 10;
+        }
+
+        if (mode === 'reversal' && candidate) {
+            if (!isLate) { candidate = null; rejectReason = 'not_late_streak'; }
+            else if (t0.absSpeed > sLow) { candidate = null; rejectReason = 'speed_too_high'; }
+        }
+    }
+
+    // Hybrid logic specific overrides
+    if (mode === 'hybrid' && candidate) {
+        if (isNoTradeStreak) { candidate = null; rejectReason = 'hybrid_no_trade_streak'; }
+        if (isNeutralMomentum) { candidate = null; rejectReason = 'hybrid_no_trade_momentum'; }
+        if (t0.absSpeed > sLow && t0.absSpeed < sHigh) { candidate = null; rejectReason = 'hybrid_speed_mid'; }
     }
 
     if (candidate) {
         const currentTickIndex = tickSeq;
-        if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks) {
-            if (cfg.debugSignals) console.log(`[3Tick][${mode}] rejected: cooldown ticks`);
-            return null;
-        }
-        if (Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs) {
-            if (cfg.debugSignals) console.log(`[3Tick][${mode}] rejected: cooldown ms`);
-            return null;
-        }
-        if (realExecState !== 'IDLE') {
-            if (cfg.debugSignals) console.log(`[3Tick][${mode}] rejected: engine busy (${realExecState})`);
-            return null;
-        }
+        if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks) return null;
+        if (Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs) return null;
+        if (realExecState !== 'IDLE') return null;
 
         lastSignalTickIndex = currentTickIndex;
         const sig = { type: candidate, price: t0.price, time: t0.epoch, result: 'PENDING', ticksAfter: [], confidence, strategy: mode };
@@ -499,16 +514,12 @@
         recordSessionTrade(sig);
         updateSignalsUI();
 
-        if (cfg.debugSignals) console.log(`[3Tick][${mode}] ACCEPTED ${candidate} score=${confidence}% digit=${t0.lastDigit} speed=${t0.speed.toFixed(4)} dc=${t0.deltaChange.toFixed(2)}`);
-
         if (cfg.realTradeEnabled) {
             realExecState = 'OPEN_PENDING';
             realLockReason = 'EXECUTING';
             updateRealUI();
             executeRealTrade(candidate);
         }
-    } else if (rejectReason && cfg.debugSignals) {
-        // Log rejection if it was a near-miss (optional, can be noisy)
     }
 
     return null;
@@ -618,7 +629,7 @@
   function saveCfg () { safeStorage('set', 'tt-cfg', cfg); }
   function loadCfg () {
     const stored = safeStorage('get', 'tt-cfg');
-    const def = { strategyMode: 'hybrid', epsilon: 0.015, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true };
+    const def = { strategyMode: 'hybrid', epsilon: 0.1, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true };
     return Object.assign(def, stored || {});
   }
 
