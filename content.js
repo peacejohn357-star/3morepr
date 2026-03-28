@@ -894,8 +894,11 @@
       return { spikePct, candidate, rejectReason: 'post_trade_lock', fired: false };
     }
 
-    // C. Real Trade Parity Lock (Simulator only trades when Real engine is IDLE)
-    if (cfg.realTradeEnabled && realExecState !== 'IDLE') {
+    // C. Real-Only Active Lock
+    if (!cfg.realTradeEnabled) {
+      return { spikePct, candidate, rejectReason: 'real_trade_disabled', fired: false };
+    }
+    if (realExecState !== 'IDLE') {
       if (cfg.debugSignals) console.log(`[3Tick][signal] rejected: real_engine_busy (state=${realExecState})`);
       return { spikePct, candidate, rejectReason: 'real_engine_busy', fired: false };
     }
@@ -921,10 +924,8 @@
     lastSignalFiredAt = Date.now(); // watchdog: track last fired signal
     updateSignalsUI();
 
-    // Trigger real execution if enabled
-    if (cfg.realTradeEnabled) {
-      executeRealTrade(candidate);
-    }
+    // Trigger Real-Only execution
+    executeRealTrade(candidate);
 
     return { spikePct, spikeAbs, spikeMode: mode, candidate, rejectReason: null, fired: true };
   }
@@ -977,41 +978,10 @@
     signals.forEach(function (sig) {
       if (sig.result !== 'PENDING') return;
 
-      // If real trading is active, we let the DOM finalize the trade result to ensure sync.
-      // We still collect ticks for duration tracking if needed, but results are synced in finalizeRealTrade.
-      if (cfg.realTradeEnabled) {
-         sig.ticksAfter.push(currentPrice);
-         return;
-      }
-
+      // ── Real-Only Logic ──
+      // Independent simulator settlement is now decommissioned.
+      // We only collect ticks for observation. Results are finalized by finalizeRealTrade().
       sig.ticksAfter.push(currentPrice);
-
-      // ── Real-world timing alignment ──
-      // Index 0: Tick seen immediately after signal (Server confirmation/lag fill) -> NEW ENTRY
-      // Index 1: Tick 1
-      // Index 2: Tick 2
-      // Index 3: Tick 3 -> SETTLEMENT
-      if (sig.ticksAfter.length === 1) {
-        // Update entry price to the first tick after signal (mimics real fill)
-        sig.entryPriceReal = currentPrice;
-      }
-
-      if (sig.ticksAfter.length >= 4) {
-        const entry  = sig.entryPriceReal || sig.price;
-        const exit   = sig.ticksAfter[3];
-        const { isWin, result } = computeTradeResult(sig.type, entry, exit);
-
-        sig.result     = result;
-        sig.priceAfter = exit;
-        if (isWin) { wins++;   updateWinsLossesUI(); }
-        else       { losses++; updateWinsLossesUI(); }
-
-        // Update global cooldown markers
-        lastTradeClosedAt   = Date.now();
-        lastTradeClosedTick = tickSeq;
-
-        changed = true;
-      }
     });
 
     if (changed) updateSignalsUI();
@@ -1642,8 +1612,11 @@
       return Object.assign(baseResult, { candidate, rejectReason: 'post_trade_lock', fired: false });
     }
 
-    // C. Real Trade Parity Lock
-    if (cfg.realTradeEnabled && realExecState !== 'IDLE') {
+    // C. Real-Only Active Lock
+    if (!cfg.realTradeEnabled) {
+      return Object.assign(baseResult, { candidate, rejectReason: 'real_trade_disabled', fired: false });
+    }
+    if (realExecState !== 'IDLE') {
       if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: real_engine_busy');
       return Object.assign(baseResult, { candidate, rejectReason: 'real_engine_busy', fired: false });
     }
@@ -1760,10 +1733,8 @@
     lastSignalFiredAt = Date.now(); // watchdog: track last fired signal
     updateSignalsUI();
 
-    // Trigger real execution if enabled
-    if (cfg.realTradeEnabled) {
-      executeRealTrade(candidate);
-    }
+    // Trigger Real-Only execution
+    executeRealTrade(candidate);
 
     return Object.assign(baseResult, {
       candidate, rejectReason: null, fired: true,
@@ -1776,8 +1747,9 @@
   function updateWinsLossesUI () {
     const we = document.getElementById('tt-wins');
     const le = document.getElementById('tt-losses');
-    if (we) we.textContent = wins;
-    if (le) le.textContent = losses;
+    // Session W/L now mirrors Real engine results
+    if (we) we.textContent = realWins;
+    if (le) le.textContent = realLosses;
   }
 
   function updateSignalsUI () {
@@ -2241,15 +2213,12 @@
     lastRealResult = res;
 
     // ── Sync Simulator Result ──
-    // When real execution is enabled, the simulated trade should match the market reality
+    // All trades are now based on market reality.
     const simTrade = signals.find(s => s.result === 'PENDING');
-    if (simTrade && cfg.realTradeEnabled) {
+    if (simTrade) {
        simTrade.result = res.result;
        simTrade.priceAfter = ticks.length ? ticks[ticks.length - 1].price : simTrade.price;
-       console.log(`[3Tick][sync] Overrode simulator result with market result: ${res.result}`);
-       // Update original simulation stats to keep parity
-       if (res.result === 'WIN') wins++;
-       else                      losses++;
+       console.log(`[3Tick][sync] Finalized trade result from market: ${res.result}`);
        updateWinsLossesUI();
     }
 
