@@ -1621,17 +1621,19 @@
     const alignScore = candidate === 'BUY' ? buyAlignment : sellAlignment;
 
     // Near-zero histogram guard: require +1 alignment when MACD hist is near zero (transition zone).
-    const isNearZeroHist = Math.abs(tickMacd.hist) <= cfg.nearZeroHistThreshold;
-    const effectiveAlignMin = isNearZeroHist ? thresholds.alignMin + 1 : thresholds.alignMin;
+    // Temporarily disabled per user request:
+    // const isNearZeroHist = Math.abs(tickMacd.hist) <= cfg.nearZeroHistThreshold;
+    // const effectiveAlignMin = isNearZeroHist ? thresholds.alignMin + 1 : thresholds.alignMin;
+    const effectiveAlignMin = thresholds.alignMin;
 
     if (alignScore < effectiveAlignMin) {
-      const rejectReason = isNearZeroHist ? 'alignment_insufficient_near_zero' : 'alignment_insufficient';
-      if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: ' + rejectReason + ' ' + candidate + ' align=' + alignScore + ' need>=' + effectiveAlignMin + ' is_near_zero_hist=' + isNearZeroHist + ' effective_align_min=' + effectiveAlignMin + ' profile=' + (cfg.entryProfile || 'balanced'));
+      const rejectReason = 'alignment_insufficient';
+      if (cfg.debugSignals) console.log('[3Tick][indicator] rejected: ' + rejectReason + ' ' + candidate + ' align=' + alignScore + ' need>=' + effectiveAlignMin + ' profile=' + (cfg.entryProfile || 'balanced'));
       return Object.assign(baseResult, {
         candidate, rejectReason, fired: false,
         chopScore: chopResult.chopScore, alignmentScoreBuy: buyAlignment, alignmentScoreSell: sellAlignment,
         entryReason: rejectReason,
-        ...(cfg.debugSignals ? { is_near_zero_hist: isNearZeroHist, effective_align_min: effectiveAlignMin } : {}),
+        ...(cfg.debugSignals ? { effective_align_min: effectiveAlignMin } : {}),
       });
     }
 
