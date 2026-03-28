@@ -903,7 +903,7 @@
 
     // Trigger real execution if enabled
     if (cfg.realTradeEnabled) {
-      executeRealTrade(sigType);
+      executeRealTrade(candidate);
     }
 
     return { spikePct, spikeAbs, spikeMode: mode, candidate, rejectReason: null, fired: true };
@@ -959,9 +959,19 @@
 
       sig.ticksAfter.push(currentPrice);
 
-      if (sig.ticksAfter.length >= 3) {
-        const entry  = sig.price;
-        const exit   = sig.ticksAfter[2];
+      // ── Real-world timing alignment ──
+      // Index 0: Tick seen immediately after signal (Server confirmation/lag fill) -> NEW ENTRY
+      // Index 1: Tick 1
+      // Index 2: Tick 2
+      // Index 3: Tick 3 -> SETTLEMENT
+      if (sig.ticksAfter.length === 1) {
+        // Update entry price to the first tick after signal (mimics real fill)
+        sig.entryPriceReal = currentPrice;
+      }
+
+      if (sig.ticksAfter.length >= 4) {
+        const entry  = sig.entryPriceReal || sig.price;
+        const exit   = sig.ticksAfter[3];
         const { isWin, result } = computeTradeResult(sig.type, entry, exit);
 
         sig.result     = result;
@@ -1734,9 +1744,10 @@
                   : sig.result === 'LOSS'    ? '<span class="tt-badge tt-badge-loss">LOSS</span>'
                   :                           '<span class="tt-badge tt-badge-pending">…</span>';
       div.className = `tt-signal ${cls}`;
+      const fillPrice = sig.entryPriceReal !== undefined ? sig.entryPriceReal : sig.price;
       div.innerHTML = `
         <span class="tt-signal-type">${sig.type}</span>
-        <span class="tt-signal-price">${sig.price.toFixed(2)}</span>
+        <span class="tt-signal-price">${fillPrice.toFixed(2)}</span>
         <span class="tt-signal-time">${fmtTime(sig.time)}</span>
         ${badge}
       `;
@@ -1765,11 +1776,12 @@
 
   // ── CSV export ────────────────────────────────────────────────────────────
   function exportCSV () {
-    const rows = [['Type', 'Entry Price', 'Time', 'Result', 'Exit Price']];
+    const rows = [['Type', 'Signal Price', 'Fill Price', 'Time', 'Result', 'Exit Price']];
     sessionTradesAll.forEach(function (s) {
       rows.push([
         s.type,
         s.price.toFixed(2),
+        s.entryPriceReal !== undefined ? s.entryPriceReal.toFixed(2) : s.price.toFixed(2),
         fmtTime(s.time),
         s.result,
         s.priceAfter !== undefined ? s.priceAfter.toFixed(2) : '',
@@ -2128,8 +2140,6 @@
     // Logic to transition state based on DOM observations
     if (count > 0 && (realExecState === 'IDLE' || realExecState === 'OPEN_PENDING')) {
       realExecState = 'OPEN';
-      clearTimeout(realExecTimer);
-      realExecTimer = null;
     }
 
     if (count === 0 && (realExecState === 'OPEN' || realExecState === 'CLOSE_PENDING' || realExecState === 'RECOVERY')) {
@@ -2162,6 +2172,10 @@
     else                      realLosses++;
     realPnl += res.pnl;
     lastRealResult = res;
+
+    // Trade closed successfully, clear the safety timer
+    clearTimeout(realExecTimer);
+    realExecTimer = null;
 
     updateRealUI();
     console.log(`[3Tick][real] Trade finalized: ${res.result} (${res.pnl})`);
