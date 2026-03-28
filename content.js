@@ -263,7 +263,10 @@
           <div class="tt-config-section-label">Real Trade Master</div>
           <div class="tt-config-row">
             <label style="color:#f0a060;font-weight:700;">Enable Real Execution</label>
-            <input type="checkbox" id="tt-cfg-real-enabled">
+            <label class="tt-switch">
+              <input type="checkbox" id="tt-cfg-real-enabled">
+              <span class="tt-slider"></span>
+            </label>
           </div>
         </div>
         <button id="tt-export">⬇ Export CSV</button>

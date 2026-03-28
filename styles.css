@@ -272,6 +272,51 @@
   font-size: 11px;
 }
 
+/* ── Custom Toggle Switch ── */
+.tt-switch {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.tt-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.tt-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #3a4260;
+  transition: .2s;
+  border-radius: 18px;
+}
+
+.tt-slider:before {
+  position: absolute;
+  content: "";
+  height: 12px;
+  width: 12px;
+  left: 3px;
+  bottom: 3px;
+  background-color: #fff;
+  transition: .2s;
+  border-radius: 50%;
+}
+
+input:checked + .tt-slider {
+  background-color: #f0a060;
+}
+
+input:checked + .tt-slider:before {
+  transform: translateX(14px);
+}
+
 #tt-config-toggle {
   background: transparent;
   border: none;
