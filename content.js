@@ -924,7 +924,11 @@
     lastSignalFiredAt = Date.now(); // watchdog: track last fired signal
     updateSignalsUI();
 
-    // Trigger Real-Only execution
+    // Trigger Real-Only execution – lock engine immediately
+    realExecState = 'OPEN_PENDING';
+    realLockReason = 'EXECUTING';
+    updateRealUI();
+
     executeRealTrade(candidate);
 
     return { spikePct, spikeAbs, spikeMode: mode, candidate, rejectReason: null, fired: true };
@@ -1733,7 +1737,11 @@
     lastSignalFiredAt = Date.now(); // watchdog: track last fired signal
     updateSignalsUI();
 
-    // Trigger Real-Only execution
+    // Trigger Real-Only execution – lock engine immediately
+    realExecState = 'OPEN_PENDING';
+    realLockReason = 'EXECUTING';
+    updateRealUI();
+
     executeRealTrade(candidate);
 
     return Object.assign(baseResult, {
@@ -2161,21 +2169,24 @@
   function updateRealExecStateFromDOM (count, closedResult) {
     const prevState = realExecState;
 
-    // Logic to transition state based on DOM observations
-    if (count > 0 && (realExecState === 'IDLE' || realExecState === 'OPEN_PENDING')) {
-      realExecState = 'OPEN';
-      // Sync pending simulation signal with actual market fill price
-      syncSimulatorEntryToMarket();
+    // 1. Priority: Handle trade closure and result settlement
+    if (closedResult && (realExecState === 'OPEN' || realExecState === 'OPEN_PENDING' || realExecState === 'CLOSE_PENDING' || realExecState === 'RECOVERY')) {
+      finalizeRealTrade(closedResult);
+      realExecState = 'IDLE';
+      realLockReason = '';
     }
-
-    if (count === 0 && (realExecState === 'OPEN' || realExecState === 'CLOSE_PENDING' || realExecState === 'RECOVERY')) {
+    else if (count === 0 && (realExecState === 'OPEN' || realExecState === 'CLOSE_PENDING' || realExecState === 'RECOVERY')) {
+      // Missing result text but count is 0: settle as unknown to ensure cooldowns are set
+      finalizeRealTrade({ pnl: 0, result: 'UNKNOWN' });
       realExecState = 'IDLE';
       realLockReason = '';
     }
 
-    if (closedResult && realExecState !== 'IDLE') {
-      finalizeRealTrade(closedResult);
-      realExecState = 'IDLE'; // Force idle after result seen
+    // 2. Handle transition to OPEN
+    if (count > 0 && (realExecState === 'IDLE' || realExecState === 'OPEN_PENDING')) {
+      realExecState = 'OPEN';
+      // Sync pending simulation signal with actual market fill price
+      syncSimulatorEntryToMarket();
     }
 
     if (prevState !== realExecState) {
@@ -2237,24 +2248,21 @@
   // ── Real Execution Core ───────────────────────────────────────────────────
 
   async function executeRealTrade (side) {
-    if (realExecState !== 'IDLE') {
-      console.warn(`[3Tick][real] Execution blocked: state=${realExecState}`);
-      return;
-    }
+    // Note: State check and 'OPEN_PENDING' transition now performed synchronously by caller (detectSignal)
+    // to prevent race conditions during rapid ticks.
 
     const now = Date.now();
     const elapsed = now - lastRealTradeAt;
     if (elapsed < cfg.realCooldownMs) {
       console.warn(`[3Tick][real] Execution blocked: cooldown (${elapsed}ms < ${cfg.realCooldownMs}ms)`);
+      realExecState = 'IDLE'; // Re-unlock if blocked by cooldown
+      realLockReason = '';
+      updateRealUI();
       return;
     }
 
     const buyLabel = side === 'BUY' ? 'Rise' : 'Fall';
     const activeClass = side === 'BUY' ? CLASS_RISE_ACTIVE : CLASS_FALL_ACTIVE;
-
-    realExecState = 'OPEN_PENDING';
-    realLockReason = 'EXECUTING';
-    updateRealUI();
 
     try {
       // 1. Verify side and set if necessary
@@ -2268,6 +2276,11 @@
       // 3. Perform Purchase
       const btn = document.querySelector(SEL_PURCHASE_BTN);
       if (!btn) throw new Error('purchase_btn_missing');
+
+      // Final side sanity check before clicking buy
+      if (!btn.classList.contains(activeClass)) {
+        throw new Error('side_mismatch_at_execution');
+      }
 
       simulateExternalClick(btn);
       lastRealTradeAt = Date.now();
@@ -2296,23 +2309,37 @@
 
     } catch (e) {
       console.error(`[3Tick][real] Execution failed: ${e.message}`);
-      realExecState = 'IDLE';
-      realLockReason = e.message;
+      // On failure, stay locked for a few seconds to prevent "hammering" the UI on errors
+      realLockReason = 'ERR:' + e.message;
       updateRealUI();
+      setTimeout(() => {
+        if (realExecState === 'OPEN_PENDING') {
+          realExecState = 'IDLE';
+          realLockReason = '';
+          updateRealUI();
+        }
+      }, 3000);
     }
   }
 
   async function setRealTradeSide (label, activeClass) {
     // Retries for side verification
     for (let attempt = 0; attempt < 3; attempt++) {
+      // Small pause before verification to allow React state to settle
+      await new Promise(r => setTimeout(r, 150));
+
       const btn = document.querySelector(SEL_PURCHASE_BTN);
-      if (btn && btn.classList.contains(activeClass)) return true;
+      if (btn && btn.classList.contains(activeClass)) {
+        console.log(`[3Tick][real] Side verified: ${label}`);
+        return true;
+      }
 
       const sideBtns = Array.from(document.querySelectorAll(SEL_SIDE_BTNS));
       const target = sideBtns.find(b => b.innerText.includes(label));
       if (target) {
+        console.log(`[3Tick][real] Selecting side: ${label} (attempt ${attempt + 1})`);
         simulateExternalClick(target);
-        await new Promise(r => setTimeout(r, 200)); // wait for DOM update
+        await new Promise(r => setTimeout(r, 350)); // wait for DOM/React update
       }
     }
     return false;
@@ -2321,9 +2348,13 @@
   function simulateExternalClick (el) {
     if (!el) return;
     const opts = { bubbles: true, cancelable: true, view: window };
+    // Comprehensive sequence for React/Quill components
+    el.dispatchEvent(new MouseEvent('mouseenter', opts));
     el.dispatchEvent(new MouseEvent('mousedown', opts));
+    el.focus();
     el.dispatchEvent(new MouseEvent('mouseup',   opts));
     el.dispatchEvent(new MouseEvent('click',     opts));
+    el.dispatchEvent(new MouseEvent('mouseleave', opts));
   }
 
   async function waitRealBuyReady () {
