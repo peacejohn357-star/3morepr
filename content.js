@@ -5,10 +5,10 @@
 (function () {
   'use strict';
 
-  // ── Constants & config ────────────────────────────────────────────────────
+  // ── Constants & Config ────────────────────────────────────────────────────
   const WS_URL          = 'wss://ws.derivws.com/websockets/v3?app_id=1089';
   const WS_URL_FALLBACK = 'wss://ws.deriv.com/websockets/v3?app_id=1089';
-  const FALLBACK_AFTER  = 3;     // consecutive failures before trying fallback endpoint
+  const FALLBACK_AFTER  = 3;
   const TICK_BUF        = 200;
   const SPEED_BUF       = 1000;   // Buffer for calculating speed percentiles
   const RECONNECT_BASE  = 4000;  // ms – initial reconnect delay
@@ -86,23 +86,20 @@
   // ── Overlay build ─────────────────────────────────────────────────────────
   function buildOverlay () {
     if (document.getElementById('tt-overlay')) return;
-
     const el = document.createElement('div');
     el.id = 'tt-overlay';
     el.innerHTML = `
       <div id="tt-header">
         <span class="tt-title">3Tick Timing V2</span>
         <div class="tt-header-btns">
-          <button id="tt-min-btn"   title="Minimise">_</button>
+          <button id="tt-min-btn" title="Minimise">_</button>
           <button id="tt-close-btn" title="Close">✕</button>
         </div>
       </div>
       <div id="tt-body">
         <div class="tt-row">
           <span class="tt-label">Status</span>
-          <span class="tt-val" id="tt-status">
-            <span class="tt-dot tt-dot-disconnected"></span>Disconnected
-          </span>
+          <span class="tt-val" id="tt-status">Disconnected</span>
         </div>
         <div class="tt-row">
           <span class="tt-label">Last Price</span>
@@ -115,9 +112,7 @@
         <div class="tt-row">
           <span class="tt-label">Session W/L</span>
           <span class="tt-val">
-            <span class="tt-wins"   id="tt-wins">0</span>
-            &nbsp;/&nbsp;
-            <span class="tt-losses" id="tt-losses">0</span>
+            <span class="tt-wins" id="tt-wins">0</span> / <span class="tt-losses" id="tt-losses">0</span>
           </span>
         </div>
         <div class="tt-row"><span class="tt-label">Signals</span></div>
@@ -142,7 +137,7 @@
             <span class="tt-val" id="tt-real-pnl">0.00</span>
           </div>
           <button id="tt-real-export">⬇ Export Real CSV</button>
-          <button id="tt-real-reset" style="background:#3d1a1a;color:#e04040;margin-top:2px;">Reset Real Engine</button>
+          <button id="tt-real-reset" style="background:#3d1a1a;color:#e04040;margin-top:2px;">Reset Engine</button>
         </div>
 
         <button id="tt-config-toggle">⚙ settings</button>
@@ -161,7 +156,7 @@
             <input type="number" id="tt-cfg-epsilon" min="0" max="0.1" step="0.001" value="0.015">
           </div>
           <div class="tt-config-row">
-            <label>Debug signals</label>
+            <label>Debug Signals</label>
             <input type="checkbox" id="tt-cfg-debug">
           </div>
           <div class="tt-config-section-label">Real Trade Master</div>
@@ -177,14 +172,13 @@
       </div>
       <div id="tt-alert"></div>
     `;
-
     document.body.appendChild(el);
 
     const saved = safeStorage('get', 'tt-pos');
     if (saved) {
       el.style.right = 'auto';
-      el.style.left  = saved.left + 'px';
-      el.style.top   = saved.top  + 'px';
+      el.style.left = saved.left + 'px';
+      el.style.top = saved.top + 'px';
     }
 
     makeDraggable(el);
@@ -201,18 +195,18 @@
       ox = e.clientX - rect.left;
       oy = e.clientY - rect.top;
       document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup',   onUp);
+      document.addEventListener('mouseup', onUp);
     });
     function onMove (e) {
       const left = e.clientX - ox;
-      const top  = e.clientY - oy;
+      const top = e.clientY - oy;
       el.style.right = 'auto';
-      el.style.left  = Math.max(0, Math.min(window.innerWidth  - el.offsetWidth,  left)) + 'px';
-      el.style.top   = Math.max(0, Math.min(window.innerHeight - el.offsetHeight, top))  + 'px';
+      el.style.left = Math.max(0, Math.min(window.innerWidth - el.offsetWidth, left)) + 'px';
+      el.style.top = Math.max(0, Math.min(window.innerHeight - el.offsetHeight, top)) + 'px';
     }
     function onUp () {
       document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup',   onUp);
+      document.removeEventListener('mouseup', onUp);
       safeStorage('set', 'tt-pos', { left: parseInt(el.style.left), top: parseInt(el.style.top) });
     }
   }
@@ -220,12 +214,11 @@
   function bindButtons (el) {
     document.getElementById('tt-min-btn').addEventListener('click', function () {
       el.classList.toggle('tt-minimized');
-      this.textContent = el.classList.contains('tt-minimized') ? '□' : '_';
     });
     document.getElementById('tt-close-btn').addEventListener('click', function () {
       manualClose = true;
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      if (ws) { ws.close(); ws = null; }
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) ws.close();
       el.remove();
     });
     document.getElementById('tt-config-toggle').addEventListener('click', function () {
@@ -249,15 +242,13 @@
       saveCfg();
     });
     document.getElementById('tt-real-export').addEventListener('click', exportRealCSV);
-    document.getElementById('tt-real-reset').addEventListener('click', function () {
+    document.getElementById('tt-real-reset').addEventListener('click', () => {
       if (confirm('Reset real-trade engine to IDLE and clear lock?')) {
         realExecState = 'IDLE';
         realLockReason = '';
         realOpenCount = 0;
         clearTimeout(realExecTimer);
-        realExecTimer = null;
         updateRealUI();
-        showAlert('Real execution engine reset.');
       }
     });
     document.getElementById('tt-export').addEventListener('click', exportCSV);
@@ -326,13 +317,10 @@
     reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX);
   }
 
-  function setWsState (state) {
+  function setWsState(state) {
     wsState = state;
     const el = document.getElementById('tt-status');
-    if (!el) return;
-    const dotClass = { connected: 'tt-dot-connected', connecting: 'tt-dot-connecting', disconnected: 'tt-dot-disconnected' };
-    const label    = { connected: 'Connected', connecting: 'Connecting…', disconnected: 'Disconnected' };
-    el.innerHTML = `<span class="tt-dot ${dotClass[state]}"></span>${label[state]}`;
+    if (el) el.textContent = state.charAt(0).toUpperCase() + state.slice(1);
   }
 
   // ── Percentile Calculation ────────────────────────────────────────────────
@@ -529,9 +517,8 @@
     if (le) le.textContent = realLosses;
   }
 
-  function updateSignalsUI () {
-    const el = document.getElementById('tt-signals-list');
-    if (!el) return;
+  function updateSignalsUI() {
+    const el = document.getElementById('tt-signals-list'); if (!el) return;
     el.innerHTML = '';
     const show = signals.slice(-10).reverse();
     show.forEach(function (sig) {
@@ -552,17 +539,19 @@
     });
   }
 
-  function showAlert (msg) {
-    const el = document.getElementById('tt-alert');
-    if (!el) return;
-    el.textContent = msg;
-    el.classList.add('tt-visible');
-    setTimeout(function () { el.classList.remove('tt-visible'); }, 5000);
+  function updateRealUI() {
+    const stEl = document.getElementById('tt-real-state'), pnlEl = document.getElementById('tt-real-pnl');
+    if (stEl) {
+      stEl.textContent = realExecState + (realLockReason ? ` (${realLockReason})` : '');
+      stEl.style.color = { IDLE: '#3ecf60', RECOVERY: '#e04040', OPEN: '#f0c040', OPEN_PENDING: '#7ec8e3' }[realExecState] || '#fff';
+    }
+    if (pnlEl) { pnlEl.textContent = realPnl.toFixed(2); pnlEl.style.color = realPnl >= 0 ? '#3ecf60' : '#e04040'; }
+    updateWinsLossesUI();
   }
 
-  function fmtTime (epoch) {
-    const d = new Date(epoch * 1000);
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  function showAlert(msg) {
+    const el = document.getElementById('tt-alert');
+    if (el) { el.textContent = msg; el.classList.add('tt-visible'); setTimeout(() => el.classList.remove('tt-visible'), 5000); }
   }
 
   function recordSessionTrade (sig) {
@@ -584,12 +573,8 @@
     });
     const csv  = rows.map(function (r) { return r.join(','); }).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
-    a.download = '3tick-signals-' + Date.now() + '.csv';
-    a.click();
-    URL.revokeObjectURL(url);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = '3tick-signals.csv'; a.click();
   }
 
   function exportRealCSV () {
@@ -686,7 +671,7 @@
     if (pending && ticks.length) { pending.entryPriceReal = ticks[ticks.length - 1].price; updateSignalsUI(); }
   }
 
-  function finalizeRealTrade (res) {
+  function finalizeRealTrade(res) {
     if (!realTrades.length) return;
     const last = realTrades[realTrades.length - 1]; if (last.result !== 'PENDING') return;
     last.result = res.result; last.pnl = res.pnl;
