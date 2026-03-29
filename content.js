@@ -10,14 +10,15 @@
   const WS_URL_FALLBACK = 'wss://ws.deriv.com/websockets/v3?app_id=1089';
   const FALLBACK_AFTER  = 3;
   const TICK_BUF        = 200;
-  const SPEED_BUF       = 100;
-  const RECONNECT_BASE  = 4000;
-  const RECONNECT_MAX   = 64000;
-  const SESSION_HISTORY_CAP = 5000;
-  const WATCHDOG_INTERVAL   = 5000;
-  const WATCHDOG_TICK_TIMEOUT = 25000;
+  const SPEED_BUF       = 1000;   // Buffer for calculating speed percentiles
+  const RECONNECT_BASE  = 4000;  // ms – initial reconnect delay
+  const RECONNECT_MAX   = 64000; // ms – reconnect delay cap
+  const SESSION_HISTORY_CAP    = 5000;  // maximum full-session trade history for CSV export
+  const WATCHDOG_INTERVAL      = 5000;  // ms – watchdog check frequency
+  const WATCHDOG_TICK_TIMEOUT  = 25000; // ms – connected but no tick → re-subscribe (stage 1)
+  const WATCHDOG_EVAL_TIMEOUT  = 20000; // ms – ticks arriving but eval stalled → reset eval state
 
-  // ── DOM Selectors ─────────────────────────────────────────────────────────
+  // ── DOM Selectors for Real Execution ──────────────────────────────────────
   const SEL_SIDE_BTNS    = '.trade-params__option > button.item';
   const SEL_PURCHASE_BTN = 'button.purchase-button.purchase-button--single';
   const CLASS_RISE_ACTIVE = 'quill__color--primary-purchase';
@@ -25,29 +26,65 @@
   const SEL_FLYOUT       = '.dc-flyout';
 
   let cfg = {
-    tickSize: 0.1,
-    strategyMode: 'hybrid',
-    epsilon: 0.2,
-    realTradeEnabled: false,
-    realTimeoutMs: 40000,
-    realCooldownMs: 5000,
-    postTradeCooldownTicks: 5,
-    postTradeCooldownMs: 5000,
-    debugSignals: true,
+    tickSize:          0.1,         // Step Index 100 minimum price movement
+    strategyMode:      'hybrid',    // 'momentum' | 'reversal' | 'structural' | 'hybrid'
+    epsilon:           0.015,       // threshold for "delta_change ≈ 0"
+    // ── Real-trade execution settings ──────────────────────────────────────
+    realTradeEnabled: false,   // master toggle for real trade execution
+    realTimeoutMs:    40000,   // ms – wait for close confirmation before RECOVERY
+    realCooldownMs:   5000,    // ms – minimum time between real trade executions
+    postTradeCooldownTicks: 5, // ticks to wait after a trade closes before new entry
+    postTradeCooldownMs:    5000, // ms to wait after a trade closes before new entry
+    debugSignals:     true,    // log signal accept/reject reasons to console
   };
 
   // ── State ─────────────────────────────────────────────────────────────────
-  let ticks = [];
-  let speedHistory = [];
-  let sHigh = 0, sLow = 0, speedMean = 0, speedStd = 0;
-  let signals = [], sessionTradesAll = [];
-  let tickSeq = 0, lastSignalTickIndex = -999, upStreak = 0, downStreak = 0;
-  let lastTickProcessedAt = 0, lastSignalEvalAt = 0, watchdogInterval = null, evalErrorCount = 0;
-  let realExecState = 'IDLE', realTrades = [], realOpenCount = 0, realWins = 0, realLosses = 0, realPnl = 0, realLockReason = '', lastRealTradeAt = 0, lastTradeClosedAt = 0, lastTradeClosedTick = -999, realExecTimer = null;
-  let flyoutObserver = null, ws = null, wsState = 'disconnected', reconnectTimer = null, resolvedSymbol = null, manualClose = false, reconnectDelay = RECONNECT_BASE, failCount = 0, usingFallback = false;
+  let ticks       = [];  // { price, epoch, receivedAt, deltaSteps, direction, speed, lastDigit, deltaChange, upStreak, downStreak }
+  let speedHistory = []; // [absSpeed, ...]
+  let sHigh       = 0;
+  let sLow        = 0;
+  let signals     = [];  // { type, price, time, result, ticksAfter, priceAfter, confidence, strategy }
+  let sessionTradesAll = []; // full session trade history for CSV export
+  let wins        = 0;
+  let losses      = 0;
+  let tickSeq                 = 0;
+  let lastSignalTickIndex     = -999;
+  let upStreak = 0;
+  let downStreak = 0;
 
-  // ── Overlay Build ─────────────────────────────────────────────────────────
-  function buildOverlay() {
+  let lastTickProcessedAt  = 0;    // Date.now() of last tick received (for watchdog)
+  let lastSignalEvalAt     = 0;    // Date.now() of last successful detectSignal() call (for watchdog)
+  let watchdogInterval     = null; // setInterval handle for the watchdog
+  let evalErrorCount       = 0;    // cumulative count of detectSignal() exceptions
+  let lastSignalFiredAt    = 0;    // Date.now() of last successfully fired signal
+
+  let flyoutObserver = null;
+
+  // ── Real-trade state ──────────────────────────────────────────────────────
+  let realExecState   = 'IDLE'; // IDLE | OPEN_PENDING | OPEN | CLOSE_PENDING | RECOVERY
+  let realTrades      = [];     // { time, signal, side, result, pnl, ... }
+  let realOpenCount   = 0;
+  let realWins        = 0;
+  let realLosses      = 0;
+  let realPnl         = 0;
+  let realLockReason  = '';     // reason for blocking trade (e.g. "OPEN_POSITION")
+  let lastRealResult  = null;   // { result, pnl } from last closed real trade
+  let realExecTimer   = null;   // timeout handle for RECOVERY transition
+  let lastRealTradeAt = 0;      // Date.now() of last execution click
+  let lastTradeClosedAt = 0;    // Date.now() when last trade finished
+  let lastTradeClosedTick = -999; // tickSeq when last trade finished
+
+  let ws             = null;
+  let wsState        = 'disconnected';
+  let reconnectTimer = null;
+  let resolvedSymbol = null;
+  let manualClose    = false;
+  let reconnectDelay = RECONNECT_BASE;
+  let failCount      = 0;
+  let usingFallback  = false;
+
+  // ── Overlay build ─────────────────────────────────────────────────────────
+  function buildOverlay () {
     if (document.getElementById('tt-overlay')) return;
     const el = document.createElement('div');
     el.id = 'tt-overlay';
@@ -73,10 +110,6 @@
           <span class="tt-val" id="tt-speed-stats">0.00 / 0.00</span>
         </div>
         <div class="tt-row">
-          <span class="tt-label">Mean / Std</span>
-          <span class="tt-val" id="tt-speed-dist">0.00 / 0.00</span>
-        </div>
-        <div class="tt-row">
           <span class="tt-label">Session W/L</span>
           <span class="tt-val">
             <span class="tt-wins" id="tt-wins">0</span> / <span class="tt-losses" id="tt-losses">0</span>
@@ -92,6 +125,14 @@
             <span class="tt-val" id="tt-real-state">IDLE</span>
           </div>
           <div class="tt-row">
+            <span class="tt-label">Real W/L</span>
+            <span class="tt-val">
+              <span class="tt-wins"   id="tt-real-wins">0</span>
+              &nbsp;/&nbsp;
+              <span class="tt-losses" id="tt-real-losses">0</span>
+            </span>
+          </div>
+          <div class="tt-row">
             <span class="tt-label">Real PnL</span>
             <span class="tt-val" id="tt-real-pnl">0.00</span>
           </div>
@@ -102,17 +143,17 @@
         <button id="tt-config-toggle">⚙ settings</button>
         <div id="tt-config">
           <div class="tt-config-row">
-            <label>Mode</label>
+            <label>Strategy Mode</label>
             <select id="tt-cfg-strategy-mode">
-              <option value="structural">Structural</option>
-              <option value="hybrid">Hybrid</option>
               <option value="momentum">Momentum</option>
               <option value="reversal">Reversal</option>
+              <option value="structural">Structural</option>
+              <option value="hybrid">Hybrid</option>
             </select>
           </div>
           <div class="tt-config-row">
-            <label>Epsilon</label>
-            <input type="number" id="tt-cfg-epsilon" min="0" max="1" step="0.01" value="0.2">
+            <label>Epsilon (ε)</label>
+            <input type="number" id="tt-cfg-epsilon" min="0" max="0.1" step="0.001" value="0.015">
           </div>
           <div class="tt-config-row">
             <label>Debug Signals</label>
@@ -144,7 +185,7 @@
     bindButtons(el);
   }
 
-  function makeDraggable(el) {
+  function makeDraggable (el) {
     const header = document.getElementById('tt-header');
     let ox = 0, oy = 0;
     header.addEventListener('mousedown', function (e) {
@@ -156,31 +197,31 @@
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
-    function onMove(e) {
+    function onMove (e) {
       const left = e.clientX - ox;
       const top = e.clientY - oy;
       el.style.right = 'auto';
       el.style.left = Math.max(0, Math.min(window.innerWidth - el.offsetWidth, left)) + 'px';
       el.style.top = Math.max(0, Math.min(window.innerHeight - el.offsetHeight, top)) + 'px';
     }
-    function onUp() {
+    function onUp () {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       safeStorage('set', 'tt-pos', { left: parseInt(el.style.left), top: parseInt(el.style.top) });
     }
   }
 
-  function bindButtons(el) {
-    document.getElementById('tt-min-btn').addEventListener('click', () => {
+  function bindButtons (el) {
+    document.getElementById('tt-min-btn').addEventListener('click', function () {
       el.classList.toggle('tt-minimized');
     });
-    document.getElementById('tt-close-btn').addEventListener('click', () => {
+    document.getElementById('tt-close-btn').addEventListener('click', function () {
       manualClose = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (ws) ws.close();
       el.remove();
     });
-    document.getElementById('tt-config-toggle').addEventListener('click', () => {
+    document.getElementById('tt-config-toggle').addEventListener('click', function () {
       document.getElementById('tt-config').classList.toggle('tt-open');
     });
 
@@ -189,7 +230,7 @@
       saveCfg();
     });
     document.getElementById('tt-cfg-epsilon').addEventListener('change', function () {
-      cfg.epsilon = parseFloat(this.value) || 0.2;
+      cfg.epsilon = parseFloat(this.value) || 0.015;
       saveCfg();
     });
     document.getElementById('tt-cfg-debug').addEventListener('change', function () {
@@ -214,29 +255,34 @@
     applyConfigToUI();
   }
 
-  // ── WebSocket & Percentiles ───────────────────────────────────────────────
-  function resolveSymbol(symbols) {
+  // ── WebSocket ─────────────────────────────────────────────────────────────
+  function resolveSymbol (symbols) {
     var candidates = ['stpRNG', 'STPRNG'];
-    for (var i = 0; i < candidates.length; i++) if (symbols.find(s => s.symbol === candidates[i])) return candidates[i];
-    var byName = symbols.find(s => /step\s*index\s*100/i.test(s.display_name));
+    for (var i = 0; i < candidates.length; i++) {
+      if (symbols.find(function (s) { return s.symbol === candidates[i]; })) {
+        return candidates[i];
+      }
+    }
+    var byName = symbols.find(function (s) {
+      return /step\s*index\s*100/i.test(s.display_name) || /step\s*100/i.test(s.display_name);
+    });
     return byName ? byName.symbol : (symbols.find(s => /step/i.test(s.display_name))?.symbol || null);
   }
 
-  function connect() {
-    if (ws && [WebSocket.OPEN, WebSocket.CONNECTING].includes(ws.readyState)) return;
+  function connect () {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     var url = usingFallback ? WS_URL_FALLBACK : WS_URL;
     setWsState('connecting');
     ws = new WebSocket(url);
-    ws.addEventListener('open', () => {
+    ws.addEventListener('open', function () {
       setWsState('connected');
       reconnectDelay = RECONNECT_BASE;
-      failCount = 0;
-      usingFallback = false;
+      failCount = 0; usingFallback = false;
       lastTickProcessedAt = Date.now();
-      lastSignalEvalAt = Date.now();
+      lastSignalEvalAt    = Date.now();
       ws.send(JSON.stringify({ active_symbols: 'brief', product_type: 'basic' }));
     });
-    ws.addEventListener('message', (e) => {
+    ws.addEventListener('message', function (e) {
       var msg; try { msg = JSON.parse(e.data); } catch (_) { return; }
       if (msg.error) return;
       if (msg.msg_type === 'active_symbols') {
@@ -247,24 +293,24 @@
         }
         return;
       }
-      if (msg.msg_type === 'tick') handleTick(msg.tick);
+      if (msg.msg_type === 'tick') { handleTick(msg.tick); }
     });
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', function (e) {
       setWsState('disconnected');
       resolvedSymbol = null;
       if (!manualClose) scheduleReconnect();
     });
-    ws.addEventListener('error', () => {
+    ws.addEventListener('error', function (e) {
       setWsState('disconnected');
       ws.close();
     });
   }
 
-  function scheduleReconnect() {
+  function scheduleReconnect () {
     if (reconnectTimer) return;
     failCount++;
     if (failCount >= FALLBACK_AFTER) { usingFallback = !usingFallback; failCount = 0; }
-    reconnectTimer = setTimeout(() => {
+    reconnectTimer = setTimeout(function () {
       reconnectTimer = null;
       connect();
     }, reconnectDelay);
@@ -277,32 +323,23 @@
     if (el) el.textContent = state.charAt(0).toUpperCase() + state.slice(1);
   }
 
-  // ── Feature Calculation ───────────────────────────────────────────────────
+  // ── Percentile Calculation ────────────────────────────────────────────────
   function calculatePercentiles() {
     if (speedHistory.length < 10) return;
     const sorted = speedHistory.slice().sort((a, b) => a - b);
-    const p30 = sorted[Math.floor(sorted.length * 0.3)];
-    const p70 = sorted[Math.floor(sorted.length * 0.7)];
-
-    const sum = speedHistory.reduce((a, b) => a + b, 0);
-    speedMean = sum / speedHistory.length;
-    const sqDiff = speedHistory.map(v => Math.pow(v - speedMean, 2));
-    speedStd = Math.sqrt(sqDiff.reduce((a, b) => a + b, 0) / speedHistory.length);
-
-    sHigh = Math.max(p70, speedMean + speedStd);
-    sLow = Math.min(p30, Math.max(0, speedMean - speedStd));
+    sLow  = sorted[Math.floor(sorted.length * 0.3)];
+    sHigh = sorted[Math.floor(sorted.length * 0.7)];
 
     const statsEl = document.getElementById('tt-speed-stats');
     if (statsEl) statsEl.textContent = `${sLow.toFixed(4)} / ${sHigh.toFixed(4)}`;
-    const distEl = document.getElementById('tt-speed-dist');
-    if (distEl) distEl.textContent = `${speedMean.toFixed(4)} / ${speedStd.toFixed(4)}`;
   }
 
-  function handleTick(tick) {
+  // ── Tick handling ─────────────────────────────────────────────────────────
+  function handleTick (tick) {
     if (!tick || tick.symbol !== resolvedSymbol) return;
     const price = parseFloat(tick.quote);
     const epoch = tick.epoch;
-    const now = Date.now();
+    const now   = Date.now();
     tickSeq++;
 
     const prevTick = ticks.length ? ticks[ticks.length - 1] : null;
@@ -312,7 +349,6 @@
     const deltaTime = prevTick ? (now - prevTick.receivedAt) : 1000;
     const speed = deltaTime > 0 ? deltaSteps / deltaTime : 0;
     const absSpeed = Math.abs(speed);
-    const speedTrend = prevTick ? (absSpeed - prevTick.absSpeed) : 0;
     const lastDigit = Math.floor(Math.round(price * 100) / 10) % 10;
     const deltaChange = prevTick ? deltaSteps - prevTick.deltaSteps : 0;
 
@@ -320,7 +356,12 @@
     else if (delta < 0) { downStreak++; upStreak = 0; }
     else { upStreak = 0; downStreak = 0; }
 
-    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange, receivedAt: now };
+    const state = {
+        epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed,
+        upStreak, downStreak, lastDigit, deltaChange,
+        receivedAt: now
+    };
+
     ticks.push(state);
     if (ticks.length > TICK_BUF) ticks.shift();
 
@@ -329,6 +370,7 @@
     calculatePercentiles();
 
     lastTickProcessedAt = Date.now();
+
     const priceEl = document.getElementById('tt-price');
     if (priceEl) priceEl.textContent = price.toFixed(2);
 
@@ -337,108 +379,162 @@
       lastSignalEvalAt = Date.now();
     } catch (e) {
       evalErrorCount++;
+      console.error('[3Tick] eval error', e);
     }
 
-    signals.forEach(sig => {
-      if (sig.result === 'PENDING') sig.ticksAfter.push(price);
-    });
+    scorePendingSignals(price);
   }
 
-  // ── Signal Detection Logic (Final Corrected Model) ────────────────────────
-  function detectSignal() {
+  // ── Signal detection ──────────────────────────────────────────────────────
+  function detectSignal () {
     const n = ticks.length;
     if (n < 2) return null;
     const t0 = ticks[n - 1];
     const mode = cfg.strategyMode;
     const eps = cfg.epsilon;
 
-    const streak = Math.max(t0.upStreak, t0.downStreak);
-    const isEarly = streak <= 2;
-    const isLate = streak >= 5;
+    let candidate = null;
+    let confidence = 0;
+    let rejectReason = '';
 
-    const buyDigits = [0, 5, 6];
-    const sellDigits = [2, 3, 8];
-    const buyDigitBias = buyDigits.includes(t0.lastDigit);
-    const sellDigitBias = sellDigits.includes(t0.lastDigit);
+    // ────────────────────────────────────────────────────────────────────────
+    if (mode === 'momentum') {
+      // ✅ BUY
+      if (t0.direction === 1 && t0.upStreak <= 3 && t0.deltaChange > 0 && t0.speed >= sHigh && [0, 6].includes(t0.lastDigit)) {
+        candidate = 'BUY'; confidence = 80;
+      }
+      // ✅ SELL
+      else if (t0.direction === -1 && t0.downStreak <= 3 && t0.deltaChange < 0 && Math.abs(t0.speed) >= sHigh && [2, 8].includes(t0.lastDigit)) {
+        candidate = 'SELL'; confidence = 80;
+      }
+      // ❌ NO TRADE
+      if (candidate) {
+          if (Math.max(t0.upStreak, t0.downStreak) >= 5) { candidate = null; rejectReason = 'streak_too_high'; }
+          else if (t0.absSpeed <= sHigh) { candidate = null; rejectReason = 'speed_not_high'; } // sHigh is top 30%
+          else if (Math.abs(t0.deltaChange) < eps) { candidate = null; rejectReason = 'delta_change_low'; }
+      }
+    }
+    // ────────────────────────────────────────────────────────────────────────
+    else if (mode === 'reversal') {
+      // ✅ BUY
+      if (t0.direction === -1 && t0.downStreak >= 5 && t0.absSpeed <= sLow && t0.deltaChange >= 0 && [0, 5].includes(t0.lastDigit)) {
+        candidate = 'BUY'; confidence = 85;
+      }
+      // ✅ SELL
+      else if (t0.direction === 1 && t0.upStreak >= 5 && t0.absSpeed <= sLow && t0.deltaChange <= 0 && [3, 7].includes(t0.lastDigit)) {
+        candidate = 'SELL'; confidence = 85;
+      }
+      // ❌ NO TRADE
+      if (candidate) {
+          if (t0.absSpeed >= sHigh) { candidate = null; rejectReason = 'speed_too_high'; }
+          else if (Math.max(t0.upStreak, t0.downStreak) < 5) { candidate = null; rejectReason = 'streak_too_low'; }
+          else if (candidate === 'BUY' ? t0.deltaChange < 0 : t0.deltaChange > 0) { candidate = null; rejectReason = 'momentum_increasing'; }
+      }
+    }
+    // ────────────────────────────────────────────────────────────────────────
+    else if (mode === 'structural') {
+      // ✅ BUY
+      if ([0, 5, 6].includes(t0.lastDigit) && t0.deltaChange >= 0) {
+        candidate = 'BUY'; confidence = 90;
+      }
+      // ✅ SELL
+      else if ([2, 3, 8].includes(t0.lastDigit) && t0.deltaChange <= 0) {
+        candidate = 'SELL'; confidence = 90;
+      }
+      // ❌ NO TRADE
+      if (candidate) {
+          if ([1, 4, 7, 9].includes(t0.lastDigit)) { candidate = null; rejectReason = 'digit_excluded'; }
+          else if (Math.abs(t0.deltaChange) < eps) { candidate = null; rejectReason = 'delta_change_low'; }
+      }
+    }
+    // ────────────────────────────────────────────────────────────────────────
+    else if (mode === 'hybrid') {
+        // ✅ BUY
+        if ([0, 5, 6].includes(t0.lastDigit) && t0.deltaChange > 0 && t0.upStreak <= 3) {
+            candidate = 'BUY'; confidence = 95;
+        }
+        // ✅ SELL
+        else if ([2, 3, 8].includes(t0.lastDigit) && t0.deltaChange < 0 && t0.downStreak <= 3) {
+            candidate = 'SELL'; confidence = 95;
+        }
+        // ❌ NO TRADE
+        if (candidate) {
+            if (Math.max(t0.upStreak, t0.downStreak) >= 5) { candidate = null; rejectReason = 'streak_too_high'; }
+            else if (Math.abs(t0.deltaChange) < eps) { candidate = null; rejectReason = 'delta_change_low'; }
+            else if (t0.absSpeed > sLow && t0.absSpeed < sHigh) { candidate = null; rejectReason = 'speed_mid_range'; }
+        }
+    }
 
-    const checkStructural = () => {
-      if (buyDigitBias && t0.deltaChange > eps) return { type: 'BUY', conf: 70 };
-      if (sellDigitBias && t0.deltaChange < -eps) return { type: 'SELL', conf: 70 };
-      return null;
-    };
-
-    const checkHybrid = () => {
-      if (buyDigitBias && t0.deltaChange > eps && isEarly && t0.speedTrend > 0) return { type: 'BUY', conf: 95 };
-      if (sellDigitBias && t0.deltaChange < -eps && isEarly && t0.speedTrend > 0) return { type: 'SELL', conf: 95 };
-      return null;
-    };
-
-    const checkMomentum = () => {
-      if (t0.direction === 1 && isEarly && t0.deltaChange > eps && t0.speedTrend > 0 && t0.absSpeed < sHigh) return { type: 'BUY', conf: 85 };
-      if (t0.direction === -1 && isEarly && t0.deltaChange < -eps && t0.speedTrend > 0 && t0.absSpeed < sHigh) return { type: 'SELL', conf: 85 };
-      return null;
-    };
-
-    const checkReversal = () => {
-      if (t0.direction === -1 && isLate && t0.absSpeed <= sLow && t0.deltaChange > -eps && t0.speedTrend < 0) return { type: 'BUY', conf: 75 };
-      if (t0.direction === 1 && isLate && t0.absSpeed <= sLow && t0.deltaChange < eps && t0.speedTrend < 0) return { type: 'SELL', conf: 75 };
-      return null;
-    };
-
-    let res = null;
-    // Evaluation Priority: Structural → Hybrid → Momentum → Reversal
-    if (mode === 'structural') res = checkStructural();
-    else if (mode === 'hybrid') res = checkHybrid() || checkStructural();
-    else if (mode === 'momentum') res = checkMomentum() || checkHybrid() || checkStructural();
-    else if (mode === 'reversal') res = checkReversal();
-
-    if (res) {
-      // Global NO-TRADE filters
-      if ([3, 4].includes(streak)) res = null;
-      else if (Math.abs(t0.deltaChange) <= eps) res = null;
-      else if (t0.absSpeed > sLow && t0.absSpeed < sHigh && Math.abs(t0.speedTrend) < 0.001) res = null;
-
-      if (res) {
+    if (candidate) {
         const currentTickIndex = tickSeq;
-        if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks) return null;
-        if (Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs) return null;
-        if (realExecState !== 'IDLE') return null;
+        if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks) {
+            if (cfg.debugSignals) console.log(`[3Tick][${mode}] rejected: cooldown ticks`);
+            return null;
+        }
+        if (Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs) {
+            if (cfg.debugSignals) console.log(`[3Tick][${mode}] rejected: cooldown ms`);
+            return null;
+        }
+        if (realExecState !== 'IDLE') {
+            if (cfg.debugSignals) console.log(`[3Tick][${mode}] rejected: engine busy (${realExecState})`);
+            return null;
+        }
 
         lastSignalTickIndex = currentTickIndex;
-        let conf = res.conf;
-        if ((res.type === 'BUY' && !buyDigitBias) || (res.type === 'SELL' && !sellDigitBias)) conf -= 10;
-
-        const sig = { type: res.type, price: t0.price, time: t0.epoch, result: 'PENDING', ticksAfter: [], confidence: Math.min(100, conf), strategy: mode };
+        const sig = { type: candidate, price: t0.price, time: t0.epoch, result: 'PENDING', ticksAfter: [], confidence, strategy: mode };
         signals.push(sig);
         if (signals.length > 50) signals.shift();
         recordSessionTrade(sig);
         updateSignalsUI();
 
+        if (cfg.debugSignals) console.log(`[3Tick][${mode}] ACCEPTED ${candidate} score=${confidence}% digit=${t0.lastDigit} speed=${t0.speed.toFixed(4)} dc=${t0.deltaChange.toFixed(2)}`);
+
         if (cfg.realTradeEnabled) {
-          realExecState = 'OPEN_PENDING';
-          realLockReason = 'EXECUTING';
-          updateRealUI();
-          executeRealTrade(res.type);
+            realExecState = 'OPEN_PENDING';
+            realLockReason = 'EXECUTING';
+            updateRealUI();
+            executeRealTrade(candidate);
         }
-      }
+    } else if (rejectReason && cfg.debugSignals) {
+        // Log rejection if it was a near-miss (optional, can be noisy)
     }
+
     return null;
   }
 
-  // ── UI & Real Execution Infrastructure ────────────────────────────────────
-  function updateWinsLossesUI() {
-    const we = document.getElementById('tt-wins'), le = document.getElementById('tt-losses');
-    if (we) we.textContent = realWins; if (le) le.textContent = realLosses;
+  function scorePendingSignals (currentPrice) {
+    signals.forEach(function (sig) {
+      if (sig.result !== 'PENDING') return;
+      sig.ticksAfter.push(currentPrice);
+    });
+  }
+
+  // ── UI helpers ────────────────────────────────────────────────────────────
+  function updateWinsLossesUI () {
+    const we = document.getElementById('tt-wins');
+    const le = document.getElementById('tt-losses');
+    if (we) we.textContent = realWins;
+    if (le) le.textContent = realLosses;
   }
 
   function updateSignalsUI() {
     const el = document.getElementById('tt-signals-list'); if (!el) return;
     el.innerHTML = '';
-    signals.slice(-10).reverse().forEach(sig => {
-      const div = document.createElement('div');
-      div.className = `tt-signal tt-signal-${sig.type.toLowerCase()}`;
-      const badge = sig.result === 'WIN' ? '<span class="tt-badge tt-badge-win">WIN</span>' : sig.result === 'LOSS' ? '<span class="tt-badge tt-badge-loss">LOSS</span>' : '<span class="tt-badge tt-badge-pending">…</span>';
-      div.innerHTML = `<span class="tt-signal-type">${sig.type}</span><span class="tt-signal-price">${(sig.entryPriceReal || sig.price).toFixed(2)}</span><span class="tt-signal-time">${new Date(sig.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} [${sig.confidence}%]</span>${badge}`;
+    const show = signals.slice(-10).reverse();
+    show.forEach(function (sig) {
+      const div  = document.createElement('div');
+      const cls  = sig.type === 'BUY' ? 'tt-signal-buy' : 'tt-signal-sell';
+      const badge = sig.result === 'WIN'     ? '<span class="tt-badge tt-badge-win">WIN</span>'
+                  : sig.result === 'LOSS'    ? '<span class="tt-badge tt-badge-loss">LOSS</span>'
+                  :                           '<span class="tt-badge tt-badge-pending">…</span>';
+      div.className = `tt-signal ${cls}`;
+      const fillPrice = sig.entryPriceReal !== undefined ? sig.entryPriceReal : sig.price;
+      div.innerHTML = `
+        <span class="tt-signal-type">${sig.type}</span>
+        <span class="tt-signal-price">${fillPrice.toFixed(2)}</span>
+        <span class="tt-signal-time">${fmtTime(sig.time)} [${sig.confidence}%]</span>
+        ${badge}
+      `;
       el.appendChild(div);
     });
   }
@@ -458,57 +554,98 @@
     if (el) { el.textContent = msg; el.classList.add('tt-visible'); setTimeout(() => el.classList.remove('tt-visible'), 5000); }
   }
 
-  function recordSessionTrade(sig) {
+  function recordSessionTrade (sig) {
     sessionTradesAll.push(sig);
     if (sessionTradesAll.length > SESSION_HISTORY_CAP) sessionTradesAll.shift();
   }
 
-  function exportCSV() {
-    if (!sessionTradesAll.length) return;
-    const rows = [['Type', 'Strategy', 'Confidence', 'Price', 'Time', 'Result']].concat(sessionTradesAll.map(s => [s.type, s.strategy, s.confidence, s.price.toFixed(2), s.time, s.result]));
-    const csv = rows.map(r => r.join(',')).join('\n');
+  function exportCSV () {
+    const rows = [['Type', 'Strategy', 'Confidence', 'Signal Price', 'Fill Price', 'Time', 'Result', 'Exit Price']];
+    sessionTradesAll.forEach(function (s) {
+      rows.push([
+        s.type, s.strategy, s.confidence,
+        s.price.toFixed(2),
+        s.entryPriceReal !== undefined ? s.entryPriceReal.toFixed(2) : s.price.toFixed(2),
+        fmtTime(s.time),
+        s.result,
+        s.priceAfter !== undefined ? s.priceAfter.toFixed(2) : '',
+      ]);
+    });
+    const csv  = rows.map(function (r) { return r.join(','); }).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = '3tick-signals.csv'; a.click();
   }
 
-  function exportRealCSV() {
-    if (!realTrades.length) return;
-    const rows = [['Time', 'Signal', 'Side', 'Result', 'PnL']].concat(realTrades.map(t => [new Date(t.time).toISOString(), t.signal, t.side, t.result, t.pnl || '']));
-    const csv = rows.map(r => r.join(',')).join('\n');
+  function exportRealCSV () {
+    if (!realTrades.length) { showAlert('No real-trade history.'); return; }
+    const headers = ['Time', 'Signal', 'Side', 'Result', 'PnL'];
+    const rows = [headers].concat(realTrades.map(t => [
+        new Date(t.time).toISOString(), t.signal, t.side, t.result, t.pnl !== undefined ? t.pnl.toFixed(2) : ''
+    ]));
+    const csv  = rows.map(r => r.join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = '3tick-real.csv'; a.click();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = '3tick-real-trades-' + Date.now() + '.csv';
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
-  function safeStorage(op, key, val) { try { if (op === 'get') return JSON.parse(localStorage.getItem(key)); if (op === 'set') localStorage.setItem(key, JSON.stringify(val)); } catch (_) { } return null; }
-  function saveCfg() { safeStorage('set', 'tt-cfg', cfg); }
-  function loadCfg() {
+  function safeStorage (op, key, value) {
+    try {
+      if (op === 'get')  return JSON.parse(localStorage.getItem(key));
+      if (op === 'set')  localStorage.setItem(key, JSON.stringify(value));
+    } catch (_) {} return null;
+  }
+
+  function saveCfg () { safeStorage('set', 'tt-cfg', cfg); }
+  function loadCfg () {
     const stored = safeStorage('get', 'tt-cfg');
-    return Object.assign({ strategyMode: 'hybrid', epsilon: 0.2, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true }, stored || {});
+    const def = { strategyMode: 'hybrid', epsilon: 0.015, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true };
+    return Object.assign(def, stored || {});
   }
 
-  function applyConfigToUI() {
+  function updateRealUI () {
+    const stEl = document.getElementById('tt-real-state'), winsEl = document.getElementById('tt-real-wins'), lossEl = document.getElementById('tt-real-losses'), pnlEl = document.getElementById('tt-real-pnl');
+    if (stEl) {
+        stEl.textContent = realExecState + (realLockReason ? ` (${realLockReason})` : '');
+        const colors = { IDLE: '#3ecf60', RECOVERY: '#e04040', OPEN: '#f0c040', OPEN_PENDING: '#7ec8e3' };
+        stEl.style.color = colors[realExecState] || '#fff';
+    }
+    if (winsEl) winsEl.textContent = realWins;
+    if (lossEl) lossEl.textContent = realLosses;
+    if (pnlEl) { pnlEl.textContent = realPnl.toFixed(2); pnlEl.style.color = realPnl >= 0 ? '#3ecf60' : '#e04040'; }
+  }
+
+  function applyConfigToUI () {
     const dbg = document.getElementById('tt-cfg-debug'), re = document.getElementById('tt-cfg-real-enabled'), mode = document.getElementById('tt-cfg-strategy-mode'), eps = document.getElementById('tt-cfg-epsilon');
-    if (dbg) dbg.checked = cfg.debugSignals; if (re) re.checked = !!cfg.realTradeEnabled; if (mode) mode.value = cfg.strategyMode; if (eps) eps.value = cfg.epsilon;
+    if (dbg) dbg.checked = cfg.debugSignals;
+    if (re) re.checked = !!cfg.realTradeEnabled;
+    if (mode) mode.value = cfg.strategyMode;
+    if (eps) eps.value = cfg.epsilon;
     updateRealUI();
   }
 
-  function startWatchdog() {
+  function startWatchdog () {
     if (watchdogInterval) clearInterval(watchdogInterval);
-    watchdogInterval = setInterval(() => {
-      const now = Date.now();
-      if (wsState !== 'connected') return;
-      if (lastTickProcessedAt > 0 && now - lastTickProcessedAt > WATCHDOG_TICK_TIMEOUT) {
-        if (ws) ws.close();
+    watchdogInterval = setInterval(function () {
+      const now = Date.now(); if (wsState !== 'connected') return;
+      const tickAge = lastTickProcessedAt > 0 ? now - lastTickProcessedAt : -1;
+      const evalAge = lastSignalEvalAt    > 0 ? now - lastSignalEvalAt    : -1;
+      if (tickAge < 0 || tickAge > WATCHDOG_TICK_TIMEOUT) {
+        if (ws) { try { ws.close(); } catch (_) {} ws = null; }
         scheduleReconnect();
+      } else if (evalAge > WATCHDOG_EVAL_TIMEOUT) {
+        lastSignalEvalAt = now;
       }
     }, WATCHDOG_INTERVAL);
   }
 
-  function setupFlyoutObserver() {
+  function setupFlyoutObserver () {
     if (flyoutObserver) return;
-    flyoutObserver = new MutationObserver(() => {
+    flyoutObserver = new MutationObserver(function () {
       const flyout = document.querySelector(SEL_FLYOUT);
       if (!flyout) { if (realOpenCount !== 0) { realOpenCount = 0; updateRealExecStateFromDOM(0, null); } return; }
       const text = flyout.innerText;
@@ -522,15 +659,16 @@
     flyoutObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
   }
 
-  function updateRealExecStateFromDOM(count, closedResult) {
+  function updateRealExecStateFromDOM (count, closedResult) {
     if (closedResult && ['OPEN', 'OPEN_PENDING', 'RECOVERY'].includes(realExecState)) { finalizeRealTrade(closedResult); realExecState = 'IDLE'; realLockReason = ''; }
     else if (count === 0 && ['OPEN', 'RECOVERY'].includes(realExecState)) { finalizeRealTrade({ pnl: 0, result: 'UNKNOWN' }); realExecState = 'IDLE'; realLockReason = ''; }
-    if (count > 0 && ['IDLE', 'OPEN_PENDING'].includes(realExecState)) {
-      realExecState = 'OPEN';
-      const pending = signals.find(s => s.result === 'PENDING' && !s.entryPriceReal);
-      if (pending && ticks.length) { pending.entryPriceReal = ticks[ticks.length - 1].price; updateSignalsUI(); }
-    }
+    if (count > 0 && ['IDLE', 'OPEN_PENDING'].includes(realExecState)) { realExecState = 'OPEN'; syncSimulatorEntryToMarket(); }
     updateRealUI();
+  }
+
+  function syncSimulatorEntryToMarket () {
+    const pending = signals.find(s => s.result === 'PENDING' && !s.entryPriceReal);
+    if (pending && ticks.length) { pending.entryPriceReal = ticks[ticks.length - 1].price; updateSignalsUI(); }
   }
 
   function finalizeRealTrade(res) {
@@ -540,56 +678,44 @@
     if (res.result === 'WIN') realWins++; else if (res.result === 'LOSS') realLosses++;
     realPnl += res.pnl;
     const simTrade = signals.find(s => s.result === 'PENDING');
-    if (simTrade) {
-      simTrade.result = res.result;
-      simTrade.priceAfter = ticks.length ? ticks[ticks.length - 1].price : simTrade.price;
-    }
+    if (simTrade) { simTrade.result = res.result; simTrade.priceAfter = ticks.length ? ticks[ticks.length - 1].price : simTrade.price; updateWinsLossesUI(); }
     lastTradeClosedAt = Date.now(); lastTradeClosedTick = tickSeq;
-    clearTimeout(realExecTimer); realExecTimer = null;
-    updateRealUI();
+    clearTimeout(realExecTimer); realExecTimer = null; updateRealUI();
   }
 
-  async function executeRealTrade(side) {
+  async function executeRealTrade (side) {
     if (Date.now() - lastRealTradeAt < cfg.realCooldownMs) return;
     const buyLabel = side === 'BUY' ? 'Rise' : 'Fall', activeClass = side === 'BUY' ? CLASS_RISE_ACTIVE : CLASS_FALL_ACTIVE;
     try {
       if (!await setRealTradeSide(buyLabel, activeClass)) throw new Error('side_failed');
       if (!await waitRealBuyReady()) throw new Error('not_ready');
-      const btn = document.querySelector(SEL_PURCHASE_BTN);
-      if (!btn || !btn.classList.contains(activeClass)) throw new Error('btn_mismatch');
-      simulateExternalClick(btn);
-      lastRealTradeAt = Date.now();
-      realTrades.push({ time: Date.now(), signal: side, side: buyLabel, result: 'PENDING' });
-      realExecTimer = setTimeout(() => {
-        if (['OPEN_PENDING', 'OPEN'].includes(realExecState)) {
-          realExecState = 'RECOVERY'; realLockReason = 'TIMEOUT'; updateRealUI();
-        }
-      }, cfg.realTimeoutMs);
+      const btn = document.querySelector(SEL_PURCHASE_BTN); if (!btn || !btn.classList.contains(activeClass)) throw new Error('btn_mismatch');
+      simulateExternalClick(btn); lastRealTradeAt = Date.now();
+      realTrades.push({ time: Date.now(), signal: side, side: buyLabel, result: 'PENDING', open_seen_at: Date.now() });
+      realExecTimer = setTimeout(() => { if (['OPEN_PENDING', 'OPEN'].includes(realExecState)) { realExecState = 'RECOVERY'; realLockReason = 'TIMEOUT'; updateRealUI(); } }, cfg.realTimeoutMs);
     } catch (e) {
       realLockReason = 'ERR:' + e.message; updateRealUI();
       setTimeout(() => { if (realExecState === 'OPEN_PENDING') { realExecState = 'IDLE'; realLockReason = ''; updateRealUI(); } }, 3000);
     }
   }
 
-  async function setRealTradeSide(label, activeClass) {
+  async function setRealTradeSide (label, activeClass) {
     for (let i = 0; i < 3; i++) {
       await new Promise(r => setTimeout(r, 150));
-      const btn = document.querySelector(SEL_PURCHASE_BTN);
-      if (btn && btn.classList.contains(activeClass)) return true;
+      const btn = document.querySelector(SEL_PURCHASE_BTN); if (btn && btn.classList.contains(activeClass)) return true;
       const target = Array.from(document.querySelectorAll(SEL_SIDE_BTNS)).find(b => b.innerText.includes(label));
       if (target) { simulateExternalClick(target); await new Promise(r => setTimeout(r, 350)); }
     }
     return false;
   }
 
-  function simulateExternalClick(el) {
+  function simulateExternalClick (el) {
     const opts = { bubbles: true, cancelable: true, view: window };
     el.dispatchEvent(new MouseEvent('mouseenter', opts)); el.dispatchEvent(new MouseEvent('mousedown', opts));
-    el.focus(); el.dispatchEvent(new MouseEvent('mouseup', opts)); el.dispatchEvent(new MouseEvent('click', opts));
-    el.dispatchEvent(new MouseEvent('mouseleave', opts));
+    el.focus(); el.dispatchEvent(new MouseEvent('mouseup', opts)); el.dispatchEvent(new MouseEvent('click', opts)); el.dispatchEvent(new MouseEvent('mouseleave', opts));
   }
 
-  async function waitRealBuyReady() {
+  async function waitRealBuyReady () {
     for (let i = 0; i < 5; i++) {
       const btn = document.querySelector(SEL_PURCHASE_BTN);
       if (btn && btn.getAttribute('data-loading') !== 'true' && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') return true;
@@ -598,6 +724,6 @@
     return false;
   }
 
-  function init() { if (document.getElementById('tt-overlay')) return; cfg = loadCfg(); buildOverlay(); connect(); startWatchdog(); setupFlyoutObserver(); }
+  function init () { if (document.getElementById('tt-overlay')) return; cfg = loadCfg(); buildOverlay(); connect(); startWatchdog(); setupFlyoutObserver(); }
   if (document.body) init(); else document.addEventListener('DOMContentLoaded', init);
 })();
