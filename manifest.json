@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "3Tick Scalper – Step Index 100 Assistant",
   "version": "1.0.0",
-  "description": "BEFORE STRUCTURE 2 Real-time tick signals, 1-min trend, S/R zones, and W/L tracking for Step Index 100 manual trading on dtrader.deriv.com",
+  "description": "STRUCTURE 2 Real-time tick signals, 1-min trend, S/R zones, and W/L tracking for Step Index 100 manual trading on dtrader.deriv.com",
   "permissions": [],
   "host_permissions": [
     "https://dtrader.deriv.com/*"
