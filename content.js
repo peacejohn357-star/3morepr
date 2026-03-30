@@ -43,7 +43,7 @@
   let signals = [], sessionTradesAll = [];
   let tickSeq = 0, lastSignalTickIndex = -999, upStreak = 0, downStreak = 0;
   let lastTickProcessedAt = 0, lastSignalEvalAt = 0, watchdogInterval = null, evalErrorCount = 0;
-  let realExecState = 'IDLE', realTrades = [], realOpenCount = 0, realWins = 0, realLosses = 0, realPnl = 0, realLockReason = '', lastRealTradeAt = 0, lastTradeClosedAt = 0, lastTradeClosedTick = -999, realExecTimer = null, lastSeenPnL = 0, lastKnownBalance = 0;
+  let realExecState = 'IDLE', realTrades = [], realOpenCount = 0, realWins = 0, realLosses = 0, realPnl = 0, realLockReason = '', lastRealTradeAt = 0, lastTradeClosedAt = 0, lastTradeClosedTick = -999, realExecTimer = null, lastSeenPnL = 0;
   let flyoutObserver = null, ws = null, wsState = 'disconnected', reconnectTimer = null, resolvedSymbol = null, manualClose = false, reconnectDelay = RECONNECT_BASE, failCount = 0, usingFallback = false;
 
   // UI Cache to prevent redundant DOM updates
@@ -474,30 +474,6 @@
   function loadCfg() { const stored = safeStorage('get', 'tt-cfg'); return Object.assign({ strategyMode: 'hybrid', epsilon: 0.2, minIntensity: 1.2, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true }, stored || {}); }
   function applyConfigToUI() { const dbg = document.getElementById('tt-cfg-debug'), re = document.getElementById('tt-cfg-real-enabled'), mode = document.getElementById('tt-cfg-strategy-mode'), eps = document.getElementById('tt-cfg-epsilon'), intensity = document.getElementById('tt-cfg-intensity'); if (dbg) dbg.checked = cfg.debugSignals; if (re) re.checked = !!cfg.realTradeEnabled; if (mode) mode.value = cfg.strategyMode; if (eps) eps.value = cfg.epsilon; if (intensity) intensity.value = cfg.minIntensity || 1.2; updateRealUI(); }
   function startWatchdog() { if (watchdogInterval) clearInterval(watchdogInterval); watchdogInterval = setInterval(() => { const now = Date.now(); if (wsState !== 'connected') return; if (lastTickProcessedAt > 0 && now - lastTickProcessedAt > WATCHDOG_TICK_TIMEOUT) { if (ws) ws.close(); scheduleReconnect(); } }, WATCHDOG_INTERVAL); }
-
-  function updateLastBalance() {
-    const el = document.querySelector('.acc-info__balance') || document.querySelector('.account-header__content-header + div');
-    if (el) {
-      const val = parseFloat(el.innerText.replace(/[^0-9.-]+/g, ""));
-      if (!isNaN(val)) lastKnownBalance = val;
-    }
-  }
-
-  function settleTradeByBalance(sig) {
-    setTimeout(() => {
-      const el = document.querySelector('.acc-info__balance') || document.querySelector('.account-header__content-header + div');
-      if (!el) return;
-      const newBalance = parseFloat(el.innerText.replace(/[^0-9.-]+/g, ""));
-      if (isNaN(newBalance)) return;
-      const diff = newBalance - lastKnownBalance;
-      if (Math.abs(diff) > 0.01) {
-        const result = diff > 0 ? 'WIN' : 'LOSS';
-        console.log(`[Settlement] Result: ${result} | PnL: ${diff.toFixed(2)}`);
-        finalizeRealTrade({ pnl: diff, result: result });
-        lastKnownBalance = newBalance;
-      }
-    }, 5000);
-  }
   let subObserver = null, lastFlyoutNode = null;
   function setupFlyoutObserver() {
     if (flyoutObserver) return;
@@ -567,11 +543,25 @@
       let count = text.includes('no open positions') ? 0 : (text.match(/(\d+)\s+open\s+position/i) ? parseInt(text.match(/(\d+)\s+open\s+position/i)[1], 10) : realOpenCount);
       let closedResult = null;
 
-      // EXPLICIT WIN/LOSS DETECTION
-      // Definite Win: Profit class or positive lastSeenPnL
-      const isDefiniteWin = hasProfitClass || lastSeenPnL > 0;
-      // Definite Loss: Contract value 0.00, Loss class, "Loss" text, or non-positive lastSeenPnL
-      const isDefiniteLoss = hasLossClass || /Contract\s+value:\s*0\.00/i.test(text) || /Loss/i.test(text) || lastSeenPnL < 0 || (lastSeenPnL === 0 && !isDefiniteWin);
+      // EXPLICIT WIN/LOSS DETECTION (Strictly PnL Color/Text based)
+      let isDefiniteWin = false, isDefiniteLoss = false;
+      const pnlElFinal = flyout.querySelector('.dc-contract-card__profit-loss-label, .dc-status-colored-text, .dc-contract-card-item__body--profit span[data-testid="dt_span"], .dc-contract-card-item__body--loss span[data-testid="dt_span"]');
+
+      if (pnlElFinal) {
+        const pnlText = pnlElFinal.innerText;
+        const style = window.getComputedStyle(pnlElFinal);
+        const color = style.color;
+
+        // Loss: Text contains 10 (stake) OR color is red-ish
+        const isRed = /rgb\(\s*(?:255|224|239|240),\s*\d+,\s*\d+\)/.test(color) || color.includes('rgba(255') || hasLossClass;
+        if (pnlText.includes('10') || isRed) {
+          isDefiniteLoss = true;
+        } else {
+          // Win: color is green-ish
+          const isGreen = /rgb\(\s*\d+,\s*(?:255|207|200),\s*\d+\)/.test(color) || color.includes('rgba(62') || hasProfitClass;
+          if (isGreen) isDefiniteWin = true;
+        }
+      }
 
       // Detection of terminal state
       // 'Total profit/loss' is present while open, so only use it if 'Closed' or '0.00' is also present
@@ -640,11 +630,9 @@
       if (!await setRealTradeSide(buyLabel, activeClass)) throw new Error('side_failed');
       if (!await waitRealBuyReady()) throw new Error('not_ready');
       const btn = document.querySelector(SEL_PURCHASE_BTN); if (!btn || !btn.classList.contains(activeClass)) throw new Error('btn_mismatch');
-      updateLastBalance();
       simulateExternalClick(btn); lastRealTradeAt = Date.now();
       const signalToMark = signals.find(s => s.result === 'PENDING' && s.isReal);
       realTrades.push({ time: Date.now(), signal: side, side: buyLabel, result: 'PENDING', signalRef: signalToMark, startTickIndex: null, startTime: null });
-      if (signalToMark) settleTradeByBalance(signalToMark);
       realExecTimer = setTimeout(() => { if (['OPEN_PENDING', 'OPEN'].includes(realExecState)) { realExecState = 'RECOVERY'; realLockReason = 'TIMEOUT'; updateRealUI(); } }, cfg.realTimeoutMs);
     } catch (e) { realLockReason = 'ERR:' + e.message; updateRealUI(); setTimeout(() => { if (realExecState === 'OPEN_PENDING') { realExecState = 'IDLE'; realLockReason = ''; updateRealUI(); } }, 3000); }
   }
@@ -671,6 +659,6 @@
     }
     return false;
   }
-  function init() { if (document.getElementById('tt-overlay')) return; cfg = loadCfg(); buildOverlay(); connect(); startWatchdog(); updateLastBalance(); setupFlyoutObserver(); window._tt_cfg = cfg; window._tt_detect = detectSignal; }
+  function init() { if (document.getElementById('tt-overlay')) return; cfg = loadCfg(); buildOverlay(); connect(); startWatchdog(); setupFlyoutObserver(); window._tt_cfg = cfg; window._tt_detect = detectSignal; }
   if (document.body) init(); else document.addEventListener('DOMContentLoaded', init);
 })();
