@@ -341,26 +341,21 @@
     };
 
     let res = null;
+    // --- PULLBACK-CONTINUATION TREND FILTER ---
+    const hist = ticks.slice(-10);
+    const slowSlope = hist.length >= 10 ? (hist[hist.length - 1].price - hist[0].price) : 0;
+    const isUptrend = slowSlope > 0.45;
+    const isDowntrend = slowSlope < -0.45;
+
     // Evaluation Logic
     if (mode === 'unleashed') {
-      const hist = ticks.slice(-12);
-      if (hist.length >= 12) {
-        const lastP = hist[hist.length - 1].price;
-        const slowSlope = lastP - hist[0].price;      // 12-tick trend
-        const medSpeed = lastP - hist[hist.length - 4].price;  // 4-tick momentum
-        const curDelta = lastP - hist[hist.length - 2].price;  // 1-tick velocity
-        const minI = cfg.minIntensity || 1.2;
-
-        if (slowSlope > 0.4 && medSpeed > 0.15 && curDelta > 0.05 && t0.intensity > minI) {
-          res = { type: 'BUY', conf: 95, triggerDesc: 'STREAK-RIDER (UP)' };
-        } else if (slowSlope < -0.4 && medSpeed < -0.15 && curDelta < -0.05 && t0.intensity > minI) {
-          res = { type: 'SELL', conf: 95, triggerDesc: 'STREAK-RIDER (DOWN)' };
-        } else {
-          // NO TREND: Run normal high-activity signals
-          res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
-        }
-      } else {
-        res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
+      res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
+      // Trend Alignment: Only follow the trend in strong markets
+      if (res) {
+        if (isUptrend && res.type === 'SELL') res = null;
+        if (isDowntrend && res.type === 'BUY') res = null;
+        // Early streak continuation: If in a trend, ensure we enter EARLY (1-2)
+        if (res && (isUptrend || isDowntrend) && streak > 2) res = null;
       }
     }
     else if (mode === 'ignitionSuite') { if (streak < 4) res = checkReversalFlip() || checkMomentumIgnition(); }
@@ -580,9 +575,10 @@
         closedResult = { pnl: lastSeenPnL, result: isDefiniteWin ? 'WIN' : 'LOSS' };
       }
 
-      if (count !== realOpenCount || closedResult) {
-        realOpenCount = count;
-        updateRealExecStateFromDOM(count, closedResult);
+      const flyoutCount = text.includes('no open positions') ? 0 : (text.match(/(\d+)\s+open\s+position/i) ? parseInt(text.match(/(\d+)\s+open\s+position/i)[1], 10) : realOpenCount);
+      if (flyoutCount !== realOpenCount || closedResult) {
+        realOpenCount = flyoutCount;
+        updateRealExecStateFromDOM(flyoutCount, closedResult);
       }
   }
   function updateRealExecStateFromDOM(count, closedResult) {
