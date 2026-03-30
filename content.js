@@ -76,7 +76,7 @@
         </div>
         <button id="tt-config-toggle">Settings</button>
         <div id="tt-config">
-          <div class="tt-config-row"><label>Mode</label><select id="tt-cfg-strategy-mode"><option value="ignition">Ignition</option><option value="structural3">Structural 3</option><option value="structural2">Structural 2</option><option value="structural">Structural</option><option value="hybrid">Hybrid</option><option value="momentum">Momentum</option><option value="reversal">Reversal</option></select></div>
+          <div class="tt-config-row"><label>Mode</label><select id="tt-cfg-strategy-mode"><option value="trendIgnition">Trend Ignition</option><option value="reversalIgnition">Reversal Ignition</option><option value="ignitionSuite">Full Ignition Suite</option><option value="ignition">Ignition</option><option value="structural3">Structural 3</option><option value="structural2">Structural 2</option><option value="structural">Structural</option><option value="hybrid">Hybrid</option><option value="momentum">Momentum</option><option value="reversal">Reversal</option></select></div>
           <div class="tt-config-row"><label>Intensity (Min)</label><input type="number" id="tt-cfg-intensity" min="0.5" max="3" step="0.1" value="1.2"></div>
           <div class="tt-config-row"><label>Epsilon</label><input type="number" id="tt-cfg-epsilon" min="0" max="1" step="0.01" value="0.2"></div>
           <div class="tt-config-row"><label>Debug Signals</label><input type="checkbox" id="tt-cfg-debug"></div>
@@ -201,10 +201,12 @@
     const speed = deltaTime > 0 ? deltaSteps / deltaTime : 0, absSpeed = Math.abs(speed);
     const speedTrend = prevTick ? (absSpeed - prevTick.absSpeed) : 0;
     const lastDigit = Math.floor(Math.round(price * 100) / 10) % 10, deltaChange = prevTick ? deltaSteps - prevTick.deltaSteps : 0;
-    const accel = prevTick ? (speed - prevTick.speed) : 0;
+    const preSpeed = prevTick ? prevTick.speed : 0;
+    const acceleration = speed - preSpeed;
+    const accel = acceleration; // Alias for compatibility with previous updates
     const intensity = speedMean > 0 ? absSpeed / speedMean : 1;
     if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
-    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange, receivedAt: now, accel, intensity };
+    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange, receivedAt: now, accel, intensity, preSpeed, acceleration };
     ticks.push(state); if (ticks.length > TICK_BUF) ticks.shift();
     speedHistory.push(absSpeed); if (speedHistory.length > SPEED_BUF) speedHistory.shift();
     calculatePercentiles(); lastTickProcessedAt = Date.now();
@@ -345,9 +347,41 @@
       return null;
     };
 
+    // 5. TREND IGNITION (Continuation Entry)
+    const checkTrendIgnition = () => {
+      const streakVal = Math.max(t0.upStreak, t0.downStreak);
+      const isSameDirection = Math.sign(t0.preSpeed) === Math.sign(t0.speed);
+      const isCleanMove = Math.abs(t0.deltaSteps) === 1;
+      const isStableAccel = t0.acceleration >= -0.0003;
+      const isWeakMove = Math.abs(t0.speed) < 0.0007;
+
+      if (streakVal <= 2 && isSameDirection && isCleanMove && isStableAccel && !isWeakMove) {
+        return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 85, triggerDesc: `Trend Ignition (S:${streakVal})` };
+      }
+      return null;
+    };
+
+    // 6. REVERSAL IGNITION (Flip Entry)
+    const checkReversalIgnition = () => {
+      const streakVal = Math.max(t0.upStreak, t0.downStreak);
+      const isFlip = Math.sign(t0.preSpeed) !== Math.sign(t0.speed);
+      const isStrongAccel = Math.abs(t0.acceleration) > 0.0007;
+      const isCleanMove = Math.abs(t0.deltaSteps) === 1;
+
+      if (streakVal <= 2 && isFlip && isStrongAccel && isCleanMove) {
+        return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 90, triggerDesc: `Rev Ignition (Accel:${t0.acceleration.toFixed(4)})` };
+      }
+      return null;
+    };
+
     let res = null;
     // Evaluation Priority
-    if (mode === 'ignition') res = checkIgnition() || checkStructural3();
+    if (mode === 'trendIgnition') res = checkTrendIgnition();
+    else if (mode === 'reversalIgnition') res = checkReversalIgnition();
+    else if (mode === 'ignitionSuite') {
+      if (Math.max(t0.upStreak, t0.downStreak) < 4) res = checkReversalIgnition() || checkTrendIgnition();
+    }
+    else if (mode === 'ignition') res = checkIgnition() || checkStructural3();
     else if (mode === 'structural3') res = checkStructural3() || checkStructural2();
     else if (mode === 'structural2') res = checkStructural2();
     else if (mode === 'structural') res = checkStructural();
