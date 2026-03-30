@@ -76,7 +76,8 @@
         </div>
         <button id="tt-config-toggle">Settings</button>
         <div id="tt-config">
-          <div class="tt-config-row"><label>Mode</label><select id="tt-cfg-strategy-mode"><option value="structural">Structural</option><option value="structural2">Structural 2</option><option value="hybrid">Hybrid</option><option value="momentum">Momentum</option><option value="reversal">Reversal</option></select></div>
+          <div class="tt-config-row"><label>Mode</label><select id="tt-cfg-strategy-mode"><option value="ignition">Ignition</option><option value="structural3">Structural 3</option><option value="structural2">Structural 2</option><option value="structural">Structural</option><option value="hybrid">Hybrid</option><option value="momentum">Momentum</option><option value="reversal">Reversal</option></select></div>
+          <div class="tt-config-row"><label>Intensity (Min)</label><input type="number" id="tt-cfg-intensity" min="0.5" max="3" step="0.1" value="1.2"></div>
           <div class="tt-config-row"><label>Epsilon</label><input type="number" id="tt-cfg-epsilon" min="0" max="1" step="0.01" value="0.2"></div>
           <div class="tt-config-row"><label>Debug Signals</label><input type="checkbox" id="tt-cfg-debug"></div>
           <div class="tt-config-section-label">Real Trade Master</div>
@@ -117,6 +118,7 @@
     document.getElementById('tt-close-btn').addEventListener('click', () => { manualClose = true; if (reconnectTimer) clearTimeout(reconnectTimer); if (ws) ws.close(); el.remove(); });
     document.getElementById('tt-config-toggle').addEventListener('click', () => document.getElementById('tt-config').classList.toggle('tt-open'));
     document.getElementById('tt-cfg-strategy-mode').addEventListener('change', function () { cfg.strategyMode = this.value; saveCfg(); });
+    document.getElementById('tt-cfg-intensity').addEventListener('change', function () { cfg.minIntensity = parseFloat(this.value) || 1.2; saveCfg(); });
     document.getElementById('tt-cfg-epsilon').addEventListener('change', function () { cfg.epsilon = parseFloat(this.value) || 0.2; saveCfg(); });
     document.getElementById('tt-cfg-debug').addEventListener('change', function () { cfg.debugSignals = this.checked; saveCfg(); });
     document.getElementById('tt-cfg-real-enabled').addEventListener('change', function () { cfg.realTradeEnabled = this.checked; saveCfg(); });
@@ -199,8 +201,10 @@
     const speed = deltaTime > 0 ? deltaSteps / deltaTime : 0, absSpeed = Math.abs(speed);
     const speedTrend = prevTick ? (absSpeed - prevTick.absSpeed) : 0;
     const lastDigit = Math.floor(Math.round(price * 100) / 10) % 10, deltaChange = prevTick ? deltaSteps - prevTick.deltaSteps : 0;
+    const accel = prevTick ? (speed - prevTick.speed) : 0;
+    const intensity = speedMean > 0 ? absSpeed / speedMean : 1;
     if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
-    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange, receivedAt: now };
+    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange, receivedAt: now, accel, intensity };
     ticks.push(state); if (ticks.length > TICK_BUF) ticks.shift();
     speedHistory.push(absSpeed); if (speedHistory.length > SPEED_BUF) speedHistory.shift();
     calculatePercentiles(); lastTickProcessedAt = Date.now();
@@ -248,13 +252,15 @@
     });
   }
 
-  // ── Signal Detection Logic (Final Corrected Model) ────────────────────────
+  // ── Signal Detection Logic (Updated with Ignition & Structural 3) ─────────
   function detectSignal() {
     const n = ticks.length; if (n < 2) return null;
     const t0 = ticks[n - 1], mode = cfg.strategyMode, eps = cfg.epsilon;
     const streak = Math.max(t0.upStreak, t0.downStreak), isEarly = streak <= 2, isLate = streak >= 4;
-    const buyDigits = [0, 5, 6, 7], sellDigits = [2, 3, 4, 8], buyDigitBias = buyDigits.includes(t0.lastDigit), sellDigitBias = sellDigits.includes(t0.lastDigit);
+    const buyDigits = [0, 5, 6, 7], sellDigits = [2, 3, 4, 8];
+    const buyDigitBias = buyDigits.includes(t0.lastDigit), sellDigitBias = sellDigits.includes(t0.lastDigit);
 
+    // 1. ORIGINAL STRATEGIES
     const checkStructural = () => {
       if (buyDigitBias && t0.deltaChange > eps) return { type: 'BUY', conf: 70 };
       if (sellDigitBias && t0.deltaChange < -eps) return { type: 'SELL', conf: 70 };
@@ -275,52 +281,89 @@
       if (t0.direction === 1 && isLate && t0.absSpeed <= sLow && t0.deltaChange < eps && t0.speedTrend < 0) return { type: 'SELL', conf: 75 };
       return null;
     };
+
+    // 2. STRUCTURAL 2 (Untouched - The original AI's working edge)
     const checkStructural2 = () => {
       const tMinus1 = n >= 2 ? ticks[n - 2] : null;
       if (!tMinus1) return null;
 
-      // "Calm Before the Storm" Timing Check: ~1000ms delay, avoid spikes < 400ms
-      // Both Setup (T-1) and Trigger (T0) should be in the "Steady" timing zone (avg 1032ms and 991ms)
       const isCalm = (tMinus1.deltaTime >= 400 && tMinus1.deltaTime <= 1800) &&
                      (t0.deltaTime >= 400 && t0.deltaTime <= 1800);
       if (!isCalm) return null;
 
-      // BUY DNA (Catching 5+ UP Streaks)
-      // SETUP (T-1): Normal Speed + Digit 2
-      // TRIGGER (T0): Direction Flip (DOWN->UP) + Accel 2.0
       if (t0.direction === 1 && tMinus1.direction === -1 && t0.deltaChange === 2) {
         if (tMinus1.lastDigit === 2) {
-          return { type: 'BUY', conf: 90, triggerDigit: tMinus1.lastDigit, triggerDesc: 'Flip+Accel(2.0)' };
+          return { type: 'BUY', conf: 90, triggerDigit: tMinus1.lastDigit, triggerDesc: 'Struct2: Flip+Accel(2.0)' };
         }
       }
-
-      // SELL DNA (Catching 5+ DOWN Streaks)
-      // SETUP (T-1): Normal Speed + Digit 2
-      // TRIGGER (T0): Direction Flip (UP->DOWN) + Accel -2.0
       if (t0.direction === -1 && tMinus1.direction === 1 && t0.deltaChange === -2) {
         if (tMinus1.lastDigit === 2) {
-          return { type: 'SELL', conf: 90, triggerDigit: tMinus1.lastDigit, triggerDesc: 'Flip+Accel(-2.0)' };
+          return { type: 'SELL', conf: 90, triggerDigit: tMinus1.lastDigit, triggerDesc: 'Struct2: Flip+Accel(-2.0)' };
         }
       }
       return null;
     };
 
+    // 3. STRUCTURAL 3 (Modified Digit 2 Edge - Catches explosive moves off the digit 2)
+    const checkStructural3 = () => {
+      const tMinus1 = n >= 2 ? ticks[n - 2] : null;
+      if (!tMinus1) return null;
+
+      const isDigit2Edge = (t0.lastDigit === 2 || tMinus1.lastDigit === 2);
+      const isPowerStep = Math.abs(t0.deltaSteps) >= 2;
+
+      if (isDigit2Edge && isPowerStep) {
+        if (t0.direction === 1) return { type: 'BUY', conf: 92, triggerDigit: 2, triggerDesc: 'Struct3: Digit2 PowerStep' };
+        if (t0.direction === -1) return { type: 'SELL', conf: 92, triggerDigit: 2, triggerDesc: 'Struct3: Digit2 PowerStep' };
+      }
+      return null;
+    };
+
+    // 4. IGNITION (New Strategy - Intensity & Flow Based)
+    const checkIgnition = () => {
+      const tMinus1 = n >= 2 ? ticks[n - 2] : null;
+      if (!tMinus1) return null;
+
+      const flow = ticks.slice(-3).map(t => t.lastDigit).join('-');
+      const minIntensity = cfg.minIntensity || 1.2;
+
+      // Ignition A: Trend Continuation Surge
+      if (streak >= 3 && t0.intensity > minIntensity && Math.abs(t0.accel) > 0.0001) {
+        if (t0.direction === 1 && t0.accel > 0) return { type: 'BUY', conf: 88, triggerDesc: 'Ignition: Trend Surge' };
+        if (t0.direction === -1 && t0.accel < 0) return { type: 'SELL', conf: 88, triggerDesc: 'Ignition: Trend Surge' };
+      }
+
+      // Ignition B: High-Probability Parity Flow Reversals
+      const buyFlows = ['0-6-5', '0-1-2'];
+      const sellFlows = ['2-3-4', '8-1-0'];
+      if (t0.direction === 1 && tMinus1.direction === -1 && buyFlows.includes(flow)) {
+        return { type: 'BUY', conf: 94, triggerDesc: `Ignition: Rev (${flow})` };
+      }
+      if (t0.direction === -1 && tMinus1.direction === 1 && sellFlows.includes(flow)) {
+        return { type: 'SELL', conf: 94, triggerDesc: `Ignition: Rev (${flow})` };
+      }
+      return null;
+    };
+
     let res = null;
-    // Evaluation Priority: Structural 2 → Structural → Hybrid → Momentum → Reversal
-    if (mode === 'structural2') res = checkStructural2();
+    // Evaluation Priority
+    if (mode === 'ignition') res = checkIgnition() || checkStructural3();
+    else if (mode === 'structural3') res = checkStructural3() || checkStructural2();
+    else if (mode === 'structural2') res = checkStructural2();
     else if (mode === 'structural') res = checkStructural();
-    else if (mode === 'hybrid') res = checkHybrid() || checkStructural2() || checkStructural();
-    else if (mode === 'momentum') res = checkMomentum() || checkHybrid() || checkStructural2() || checkStructural();
+    else if (mode === 'hybrid') res = checkIgnition() || checkStructural3() || checkHybrid() || checkStructural2();
+    else if (mode === 'momentum') res = checkMomentum() || checkHybrid() || checkStructural2();
     else if (mode === 'reversal') res = checkReversal();
 
     if (res) {
-      // Global NO-TRADE filters (Removed streak 3,4 blocking as per latest data)
-      if (Math.abs(t0.deltaChange) < eps) res = null;
+      if (Math.abs(t0.deltaChange) < eps && !['ignition', 'structural3', 'structural2'].includes(mode)) res = null;
       if (res) {
         const currentTickIndex = tickSeq;
         if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks || Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs || realExecState !== 'IDLE') return null;
         lastSignalTickIndex = currentTickIndex;
-        let conf = res.conf; if ((res.type === 'BUY' && !buyDigitBias) || (res.type === 'SELL' && !sellDigitBias)) conf -= 10;
+        let conf = res.conf;
+        if (!res.triggerDesc && ((res.type === 'BUY' && !buyDigitBias) || (res.type === 'SELL' && !sellDigitBias))) conf -= 10;
+
         const sig = {
           type: res.type,
           price: t0.price,
@@ -400,8 +443,8 @@
   }
   function safeStorage(op, key, val) { try { if (op === 'get') return JSON.parse(localStorage.getItem(key)); if (op === 'set') localStorage.setItem(key, JSON.stringify(val)); } catch (_) { } return null; }
   function saveCfg() { safeStorage('set', 'tt-cfg', cfg); }
-  function loadCfg() { const stored = safeStorage('get', 'tt-cfg'); return Object.assign({ strategyMode: 'hybrid', epsilon: 0.2, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true }, stored || {}); }
-  function applyConfigToUI() { const dbg = document.getElementById('tt-cfg-debug'), re = document.getElementById('tt-cfg-real-enabled'), mode = document.getElementById('tt-cfg-strategy-mode'), eps = document.getElementById('tt-cfg-epsilon'); if (dbg) dbg.checked = cfg.debugSignals; if (re) re.checked = !!cfg.realTradeEnabled; if (mode) mode.value = cfg.strategyMode; if (eps) eps.value = cfg.epsilon; updateRealUI(); }
+  function loadCfg() { const stored = safeStorage('get', 'tt-cfg'); return Object.assign({ strategyMode: 'hybrid', epsilon: 0.2, minIntensity: 1.2, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true }, stored || {}); }
+  function applyConfigToUI() { const dbg = document.getElementById('tt-cfg-debug'), re = document.getElementById('tt-cfg-real-enabled'), mode = document.getElementById('tt-cfg-strategy-mode'), eps = document.getElementById('tt-cfg-epsilon'), intensity = document.getElementById('tt-cfg-intensity'); if (dbg) dbg.checked = cfg.debugSignals; if (re) re.checked = !!cfg.realTradeEnabled; if (mode) mode.value = cfg.strategyMode; if (eps) eps.value = cfg.epsilon; if (intensity) intensity.value = cfg.minIntensity || 1.2; updateRealUI(); }
   function startWatchdog() { if (watchdogInterval) clearInterval(watchdogInterval); watchdogInterval = setInterval(() => { const now = Date.now(); if (wsState !== 'connected') return; if (lastTickProcessedAt > 0 && now - lastTickProcessedAt > WATCHDOG_TICK_TIMEOUT) { if (ws) ws.close(); scheduleReconnect(); } }, WATCHDOG_INTERVAL); }
   let subObserver = null, lastFlyoutNode = null;
   function setupFlyoutObserver() {
