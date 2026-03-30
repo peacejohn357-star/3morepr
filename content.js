@@ -341,30 +341,9 @@
     };
 
     let res = null;
-    // --- MICRO-BREAKOUT TREND FILTER ---
-    const hist = ticks.slice(-6);
-    let localHigh = -Infinity, localLow = Infinity;
-    if (hist.length >= 6) {
-      for (let i = 0; i < hist.length - 1; i++) {
-        if (hist[i].price > localHigh) localHigh = hist[i].price;
-        if (hist[i].price < localLow) localLow = hist[i].price;
-      }
-    }
-
     // Evaluation Logic
     if (mode === 'unleashed') {
       res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
-      // Breakout Guard: Only enter if price is breaking the recent micro-range
-      if (res) {
-        if (res.type === 'BUY' && t0.price < localHigh) res = null;
-        if (res.type === 'SELL' && t0.price > localLow) res = null;
-
-        // Sample-Based Digit Refinement (Preventing clusters)
-        if (res) {
-          if (res.type === 'BUY' && [0, 1, 5, 8].includes(t0.lastDigit)) res = null;
-          if (res.type === 'SELL' && [2, 7, 9].includes(t0.lastDigit)) res = null;
-        }
-      }
     }
     else if (mode === 'ignitionSuite') { if (streak < 4) res = checkReversalFlip() || checkMomentumIgnition(); }
     else if (mode === 'trendIgnition') res = checkTrendIgnition();
@@ -378,13 +357,6 @@
     else if (mode === 'reversal') res = checkReversal() || checkReversalFlip();
 
     if (res) {
-      // --- UNLEASHED SAFETY GUARDS ---
-      // 1. Acceleration Cap (Gapping Prevention)
-      if (Math.abs(t0.acceleration) > 0.005) res = null;
-
-      // 2. SELL "Dead End" Digit Filter
-      if (res && res.type === 'SELL' && t0.lastDigit < 2) res = null;
-
       if (res) {
         const currentTickIndex = tickSeq;
         if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks || Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs || realExecState !== 'IDLE') return null;
@@ -543,34 +515,21 @@
       let count = text.includes('no open positions') ? 0 : (text.match(/(\d+)\s+open\s+position/i) ? parseInt(text.match(/(\d+)\s+open\s+position/i)[1], 10) : realOpenCount);
       let closedResult = null;
 
-      // EXPLICIT WIN/LOSS DETECTION (Strictly PnL Color/Text based)
-      let isDefiniteWin = false, isDefiniteLoss = false;
+      // EXPLICIT WIN/LOSS DETECTION (Strictly '10' presence = LOSS)
+      let isDefiniteLoss = false;
       const pnlElFinal = flyout.querySelector('.dc-contract-card__profit-loss-label, .dc-status-colored-text, .dc-contract-card-item__body--profit span[data-testid="dt_span"], .dc-contract-card-item__body--loss span[data-testid="dt_span"]');
 
-      if (pnlElFinal) {
-        const pnlText = pnlElFinal.innerText;
-        const style = window.getComputedStyle(pnlElFinal);
-        const color = style.color;
-
-        // Loss: Text contains 10 (stake) OR color is red-ish
-        const isRed = /rgb\(\s*(?:255|224|239|240),\s*\d+,\s*\d+\)/.test(color) || color.includes('rgba(255') || hasLossClass;
-        if (pnlText.includes('10') || isRed) {
-          isDefiniteLoss = true;
-        } else {
-          // Win: color is green-ish
-          const isGreen = /rgb\(\s*\d+,\s*(?:255|207|200),\s*\d+\)/.test(color) || color.includes('rgba(62') || hasProfitClass;
-          if (isGreen) isDefiniteWin = true;
-        }
+      if (pnlElFinal && pnlElFinal.innerText.includes('10')) {
+        isDefiniteLoss = true;
       }
 
       // Detection of terminal state
-      // 'Total profit/loss' is present while open, so only use it if 'Closed' or '0.00' is also present
       const isClosed = text.includes('Closed') || /Contract\s+value:\s*0\.00/i.test(text);
 
       if (isClosed) {
-        closedResult = { pnl: lastSeenPnL, result: isDefiniteWin ? 'WIN' : 'LOSS' };
+        closedResult = { pnl: lastSeenPnL, result: isDefiniteLoss ? 'LOSS' : 'WIN' };
       } else if (text.includes('no open positions') && realExecState === 'OPEN') {
-        closedResult = { pnl: lastSeenPnL, result: isDefiniteWin ? 'WIN' : 'LOSS' };
+        closedResult = { pnl: lastSeenPnL, result: isDefiniteLoss ? 'LOSS' : 'WIN' };
       }
 
       const flyoutCount = text.includes('no open positions') ? 0 : (text.match(/(\d+)\s+open\s+position/i) ? parseInt(text.match(/(\d+)\s+open\s+position/i)[1], 10) : realOpenCount);
