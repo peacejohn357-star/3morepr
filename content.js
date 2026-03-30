@@ -342,7 +342,27 @@
 
     let res = null;
     // Evaluation Logic
-    if (mode === 'unleashed') res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
+    if (mode === 'unleashed') {
+      const hist = ticks.slice(-12);
+      if (hist.length >= 12) {
+        const lastP = hist[hist.length - 1].price;
+        const slowSlope = lastP - hist[0].price;      // 12-tick trend
+        const medSpeed = lastP - hist[hist.length - 4].price;  // 4-tick momentum
+        const curDelta = lastP - hist[hist.length - 2].price;  // 1-tick velocity
+        const minI = cfg.minIntensity || 1.2;
+
+        if (slowSlope > 0.4 && medSpeed > 0.15 && curDelta > 0.05 && t0.intensity > minI) {
+          res = { type: 'BUY', conf: 95, triggerDesc: 'STREAK-RIDER (UP)' };
+        } else if (slowSlope < -0.4 && medSpeed < -0.15 && curDelta < -0.05 && t0.intensity > minI) {
+          res = { type: 'SELL', conf: 95, triggerDesc: 'STREAK-RIDER (DOWN)' };
+        } else {
+          // NO TREND: Run normal high-activity signals
+          res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
+        }
+      } else {
+        res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
+      }
+    }
     else if (mode === 'ignitionSuite') { if (streak < 4) res = checkReversalFlip() || checkMomentumIgnition(); }
     else if (mode === 'trendIgnition') res = checkTrendIgnition();
     else if (mode === 'reversalIgnition') res = checkReversalIgnition();
