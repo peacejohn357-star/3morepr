@@ -341,9 +341,30 @@
     };
 
     let res = null;
+    // --- MICRO-BREAKOUT TREND FILTER ---
+    const hist = ticks.slice(-6);
+    let localHigh = -Infinity, localLow = Infinity;
+    if (hist.length >= 6) {
+      for (let i = 0; i < hist.length - 1; i++) {
+        if (hist[i].price > localHigh) localHigh = hist[i].price;
+        if (hist[i].price < localLow) localLow = hist[i].price;
+      }
+    }
+
     // Evaluation Logic
     if (mode === 'unleashed') {
       res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
+      // Breakout Guard: Only enter if price is breaking the recent micro-range
+      if (res) {
+        if (res.type === 'BUY' && t0.price < localHigh) res = null;
+        if (res.type === 'SELL' && t0.price > localLow) res = null;
+
+        // Sample-Based Digit Refinement (Preventing clusters)
+        if (res) {
+          if (res.type === 'BUY' && [0, 1, 5, 8].includes(t0.lastDigit)) res = null;
+          if (res.type === 'SELL' && [2, 7, 9].includes(t0.lastDigit)) res = null;
+        }
+      }
     }
     else if (mode === 'ignitionSuite') { if (streak < 4) res = checkReversalFlip() || checkMomentumIgnition(); }
     else if (mode === 'trendIgnition') res = checkTrendIgnition();
