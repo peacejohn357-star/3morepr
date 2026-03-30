@@ -341,21 +341,29 @@
     };
 
     let res = null;
-    // --- PULLBACK-CONTINUATION TREND FILTER ---
-    const hist = ticks.slice(-10);
-    const slowSlope = hist.length >= 10 ? (hist[hist.length - 1].price - hist[0].price) : 0;
-    const isUptrend = slowSlope > 0.45;
-    const isDowntrend = slowSlope < -0.45;
+    // --- MICRO-BREAKOUT TREND FILTER ---
+    const hist = ticks.slice(-6);
+    let localHigh = -Infinity, localLow = Infinity;
+    if (hist.length >= 6) {
+      for (let i = 0; i < hist.length - 1; i++) {
+        if (hist[i].price > localHigh) localHigh = hist[i].price;
+        if (hist[i].price < localLow) localLow = hist[i].price;
+      }
+    }
 
     // Evaluation Logic
     if (mode === 'unleashed') {
       res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
-      // Trend Alignment: Only follow the trend in strong markets
+      // Breakout Guard: Only enter if price is breaking the recent micro-range
       if (res) {
-        if (isUptrend && res.type === 'SELL') res = null;
-        if (isDowntrend && res.type === 'BUY') res = null;
-        // Early streak continuation: If in a trend, ensure we enter EARLY (1-2)
-        if (res && (isUptrend || isDowntrend) && streak > 2) res = null;
+        if (res.type === 'BUY' && t0.price < localHigh) res = null;
+        if (res.type === 'SELL' && t0.price > localLow) res = null;
+
+        // Sample-Based Digit Refinement (Preventing clusters)
+        if (res) {
+          if (res.type === 'BUY' && [0, 1, 5, 8].includes(t0.lastDigit)) res = null;
+          if (res.type === 'SELL' && [2, 7, 9].includes(t0.lastDigit)) res = null;
+        }
       }
     }
     else if (mode === 'ignitionSuite') { if (streak < 4) res = checkReversalFlip() || checkMomentumIgnition(); }
