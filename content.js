@@ -76,7 +76,7 @@
         </div>
         <button id="tt-config-toggle">Settings</button>
         <div id="tt-config">
-          <div class="tt-config-row"><label>Mode</label><select id="tt-cfg-strategy-mode"><option value="trendIgnition">🚀 Trend Ignition</option><option value="reversalIgnition">🔄 Reversal Ignition</option><option value="ignitionSuite">Full Ignition Suite</option><option value="ignition">Ignition</option><option value="structural3">Structural 3</option><option value="structural2">Structural 2</option><option value="structural">Structural</option><option value="hybrid">Hybrid</option><option value="momentum">Momentum</option><option value="reversal">Reversal</option></select></div>
+          <div class="tt-config-row"><label>Mode</label><select id="tt-cfg-strategy-mode"><option value="unleashed">🔥 Unleashed High-Activity</option><option value="trendIgnition">🚀 Trend Ignition</option><option value="reversalIgnition">🔄 Reversal Ignition</option><option value="ignitionSuite">Full Ignition Suite</option><option value="ignition">Ignition</option><option value="structural3">Structural 3</option><option value="structural2">Structural 2</option><option value="structural">Structural</option><option value="hybrid">Hybrid</option><option value="momentum">Momentum</option><option value="reversal">Reversal</option></select></div>
           <div class="tt-config-row"><label>Intensity (Min)</label><input type="number" id="tt-cfg-intensity" min="0.5" max="3" step="0.1" value="1.2"></div>
           <div class="tt-config-row"><label>Epsilon</label><input type="number" id="tt-cfg-epsilon" min="0" max="1" step="0.01" value="0.2"></div>
           <div class="tt-config-row"><label>Debug Signals</label><input type="checkbox" id="tt-cfg-debug"></div>
@@ -204,9 +204,10 @@
     const preSpeed = prevTick ? prevTick.speed : 0;
     const acceleration = speed - preSpeed;
     const accel = acceleration; // Alias for compatibility with previous updates
-    const intensity = speedMean > 0 ? absSpeed / speedMean : 1;
+    const intensity = Math.abs(speed) / (speedMean || 0.0007);
+    const deltaChangeVal = prevTick ? deltaSteps - prevTick.deltaSteps : 0;
     if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
-    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange, receivedAt: now, accel, intensity, preSpeed, acceleration };
+    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration };
     ticks.push(state); if (ticks.length > TICK_BUF) ticks.shift();
     speedHistory.push(absSpeed); if (speedHistory.length > SPEED_BUF) speedHistory.shift();
     calculatePercentiles(); lastTickProcessedAt = Date.now();
@@ -254,15 +255,15 @@
     });
   }
 
-  // ── Signal Detection Logic (Updated with Ignition & Structural 3) ─────────
+  // ── Signal Detection Logic (Unleashed High-Activity Version) ─────────────
   function detectSignal() {
     const n = ticks.length; if (n < 2) return null;
-    const t0 = ticks[n - 1], mode = cfg.strategyMode, eps = cfg.epsilon;
+    const t0 = ticks[n - 1], tMinus1 = ticks[n - 2], mode = cfg.strategyMode, eps = cfg.epsilon;
     const streak = Math.max(t0.upStreak, t0.downStreak), isEarly = streak <= 2, isLate = streak >= 4;
     const buyDigits = [0, 5, 6, 7], sellDigits = [2, 3, 4, 8];
     const buyDigitBias = buyDigits.includes(t0.lastDigit), sellDigitBias = sellDigits.includes(t0.lastDigit);
 
-    // 1. ORIGINAL STRATEGIES
+    // --- STRATEGY HELPERS ---
     const checkStructural = () => {
       if (buyDigitBias && t0.deltaChange > eps) return { type: 'BUY', conf: 70 };
       if (sellDigitBias && t0.deltaChange < -eps) return { type: 'SELL', conf: 70 };
@@ -283,138 +284,99 @@
       if (t0.direction === 1 && isLate && t0.absSpeed <= sLow && t0.deltaChange < eps && t0.speedTrend < 0) return { type: 'SELL', conf: 75 };
       return null;
     };
-
-    // 2. STRUCTURAL 2 (Untouched - The original AI's working edge)
     const checkStructural2 = () => {
-      const tMinus1 = n >= 2 ? ticks[n - 2] : null;
-      if (!tMinus1) return null;
-
-      const isCalm = (tMinus1.deltaTime >= 400 && tMinus1.deltaTime <= 1800) &&
-                     (t0.deltaTime >= 400 && t0.deltaTime <= 1800);
+      // Refined: Relaxed timing to handle fast ignition ticks
+      const isCalm = (tMinus1.deltaTime >= 200 && tMinus1.deltaTime <= 2500) && (t0.deltaTime >= 200 && t0.deltaTime <= 2500);
       if (!isCalm) return null;
-
       if (t0.direction === 1 && tMinus1.direction === -1 && t0.deltaChange === 2) {
-        if (tMinus1.lastDigit === 2) {
-          return { type: 'BUY', conf: 90, triggerDigit: tMinus1.lastDigit, triggerDesc: 'Struct2: Flip+Accel(2.0)' };
-        }
+        if (tMinus1.lastDigit === 2) return { type: 'BUY', conf: 90, triggerDigit: 2, triggerDesc: 'Struct2: Flip+Accel(2.0)' };
       }
       if (t0.direction === -1 && tMinus1.direction === 1 && t0.deltaChange === -2) {
-        if (tMinus1.lastDigit === 2) {
-          return { type: 'SELL', conf: 90, triggerDigit: tMinus1.lastDigit, triggerDesc: 'Struct2: Flip+Accel(-2.0)' };
-        }
+        if (tMinus1.lastDigit === 2) return { type: 'SELL', conf: 90, triggerDigit: 2, triggerDesc: 'Struct2: Flip+Accel(-2.0)' };
       }
       return null;
     };
-
-    // 3. STRUCTURAL 3 (Modified Digit 2 Edge - Catches explosive moves off the digit 2)
-    const checkStructural3 = () => {
-      const tMinus1 = n >= 2 ? ticks[n - 2] : null;
-      if (!tMinus1) return null;
-
+    const checkPowerStep = () => {
       const isDigit2Edge = (t0.lastDigit === 2 || tMinus1.lastDigit === 2);
-      const isPowerStep = Math.abs(t0.deltaSteps) >= 2;
-
-      if (isDigit2Edge && isPowerStep) {
-        if (t0.direction === 1) return { type: 'BUY', conf: 92, triggerDigit: 2, triggerDesc: 'Struct3: Digit2 PowerStep' };
-        if (t0.direction === -1) return { type: 'SELL', conf: 92, triggerDigit: 2, triggerDesc: 'Struct3: Digit2 PowerStep' };
-      }
+      const isPowerMove = Math.abs(t0.deltaSteps) >= 2;
+      if (isDigit2Edge && isPowerMove) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 98, triggerDesc: 'POWER-PIVOT', triggerDigit: 2 };
       return null;
     };
-
-    // 4. IGNITION (New Strategy - Intensity & Flow Based)
+    const checkMomentumIgnition = () => {
+      const isIgnition = Math.abs(t0.acceleration) > 0.0015 && Math.abs(t0.deltaSteps) === 1;
+      if (isIgnition && streak <= 2) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 90, triggerDesc: 'MOMENTUM-IGN' };
+      return null;
+    };
+    const checkReversalFlip = () => {
+      const isFlip = Math.sign(tMinus1.speed) !== Math.sign(t0.speed);
+      if (isFlip && Math.abs(t0.acceleration) > 0.002) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 95, triggerDesc: 'EXPLOSIVE-FLIP' };
+      return null;
+    };
     const checkIgnition = () => {
-      const tMinus1 = n >= 2 ? ticks[n - 2] : null;
-      if (!tMinus1) return null;
-
       const flow = ticks.slice(-3).map(t => t.lastDigit).join('-');
       const minIntensity = cfg.minIntensity || 1.2;
-
-      // Ignition A: Trend Continuation Surge
-      if (streak >= 3 && t0.intensity > minIntensity && Math.abs(t0.accel) > 0.0001) {
-        if (t0.direction === 1 && t0.accel > 0) return { type: 'BUY', conf: 88, triggerDesc: 'Ignition: Trend Surge' };
-        if (t0.direction === -1 && t0.accel < 0) return { type: 'SELL', conf: 88, triggerDesc: 'Ignition: Trend Surge' };
+      if (streak >= 3 && t0.intensity > minIntensity && Math.abs(t0.acceleration) > 0.0001) {
+        if (t0.direction === 1 && t0.acceleration > 0) return { type: 'BUY', conf: 88, triggerDesc: 'Ignition: Trend Surge' };
+        if (t0.direction === -1 && t0.acceleration < 0) return { type: 'SELL', conf: 88, triggerDesc: 'Ignition: Trend Surge' };
       }
-
-      // Ignition B: High-Probability Parity Flow Reversals
-      const buyFlows = ['0-6-5', '0-1-2'];
-      const sellFlows = ['2-3-4', '8-1-0'];
-      if (t0.direction === 1 && tMinus1.direction === -1 && buyFlows.includes(flow)) {
-        return { type: 'BUY', conf: 94, triggerDesc: `Ignition: Rev (${flow})` };
-      }
-      if (t0.direction === -1 && tMinus1.direction === 1 && sellFlows.includes(flow)) {
-        return { type: 'SELL', conf: 94, triggerDesc: `Ignition: Rev (${flow})` };
-      }
+      const buyFlows = ['0-6-5', '0-1-2'], sellFlows = ['2-3-4', '8-1-0'];
+      if (t0.direction === 1 && tMinus1.direction === -1 && buyFlows.includes(flow)) return { type: 'BUY', conf: 94, triggerDesc: `Ignition: Rev (${flow})` };
+      if (t0.direction === -1 && tMinus1.direction === 1 && sellFlows.includes(flow)) return { type: 'SELL', conf: 94, triggerDesc: `Ignition: Rev (${flow})` };
       return null;
     };
-
-    // 5. TREND IGNITION (Continuation Entry)
     const checkTrendIgnition = () => {
-      const streakVal = Math.max(t0.upStreak, t0.downStreak);
       const isSameDirection = Math.sign(t0.preSpeed) === Math.sign(t0.speed);
       const isCleanMove = Math.abs(t0.deltaSteps) === 1;
       const isStableAccel = t0.acceleration >= -0.0003;
       const isWeakMove = Math.abs(t0.speed) < 0.0007;
-
-      if (streakVal <= 2 && isSameDirection && isCleanMove && isStableAccel && !isWeakMove) {
-        return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 85, triggerDesc: `Trend Ignition (S:${streakVal})` };
-      }
+      if (streak <= 2 && isSameDirection && isCleanMove && isStableAccel && !isWeakMove) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 85, triggerDesc: `Trend Ignition (S:${streak})` };
       return null;
     };
-
-    // 6. REVERSAL IGNITION (Flip Entry)
     const checkReversalIgnition = () => {
-      const streakVal = Math.max(t0.upStreak, t0.downStreak);
       const isFlip = Math.sign(t0.preSpeed) !== Math.sign(t0.speed);
       const isStrongAccel = Math.abs(t0.acceleration) > 0.0007;
       const isCleanMove = Math.abs(t0.deltaSteps) === 1;
-
-      if (streakVal <= 2 && isFlip && isStrongAccel && isCleanMove) {
-        return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 90, triggerDesc: `Rev Ignition (Accel:${t0.acceleration.toFixed(4)})` };
-      }
+      if (streak <= 2 && isFlip && isStrongAccel && isCleanMove) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 90, triggerDesc: `Rev Ignition (Accel:${t0.acceleration.toFixed(4)})` };
       return null;
     };
 
     let res = null;
-    // Evaluation Priority
-    if (mode === 'trendIgnition') res = checkTrendIgnition();
+    // Evaluation Logic
+    if (mode === 'unleashed') res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
+    else if (mode === 'ignitionSuite') { if (streak < 4) res = checkReversalFlip() || checkMomentumIgnition(); }
+    else if (mode === 'trendIgnition') res = checkTrendIgnition();
     else if (mode === 'reversalIgnition') res = checkReversalIgnition();
-    else if (mode === 'ignitionSuite') {
-      if (Math.max(t0.upStreak, t0.downStreak) < 4) res = checkReversalIgnition() || checkTrendIgnition();
-    }
-    else if (mode === 'ignition') res = checkIgnition() || checkStructural3();
-    else if (mode === 'structural3') res = checkStructural3() || checkStructural2();
+    else if (mode === 'ignition') res = checkIgnition() || checkPowerStep();
+    else if (mode === 'structural3') res = checkPowerStep() || checkStructural2();
     else if (mode === 'structural2') res = checkStructural2();
     else if (mode === 'structural') res = checkStructural();
-    else if (mode === 'hybrid') res = checkIgnition() || checkStructural3() || checkHybrid() || checkStructural2();
-    else if (mode === 'momentum') res = checkMomentum() || checkHybrid() || checkStructural2();
-    else if (mode === 'reversal') res = checkReversal();
+    else if (mode === 'hybrid') res = checkIgnition() || checkPowerStep() || checkMomentumIgnition() || checkHybrid() || checkStructural2();
+    else if (mode === 'momentum') res = checkMomentum() || checkMomentumIgnition() || checkPowerStep() || checkHybrid() || checkStructural2();
+    else if (mode === 'reversal') res = checkReversal() || checkReversalFlip();
 
     if (res) {
-      if (Math.abs(t0.deltaChange) < eps && !['ignition', 'structural3', 'structural2'].includes(mode)) res = null;
-      if (res) {
-        const currentTickIndex = tickSeq;
-        if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks || Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs || realExecState !== 'IDLE') return null;
-        lastSignalTickIndex = currentTickIndex;
-        let conf = res.conf;
-        if (!res.triggerDesc && ((res.type === 'BUY' && !buyDigitBias) || (res.type === 'SELL' && !sellDigitBias))) conf -= 10;
+      const currentTickIndex = tickSeq;
+      if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks || Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs || realExecState !== 'IDLE') return null;
+      lastSignalTickIndex = currentTickIndex;
+      let conf = res.conf;
+      if (!res.triggerDesc?.includes('POWER') && ((res.type === 'BUY' && !buyDigitBias) || (res.type === 'SELL' && !sellDigitBias))) conf -= 10;
 
-        const sig = {
-          type: res.type,
-          price: t0.price,
-          time: t0.epoch,
-          result: 'PENDING',
-          ticksAfter: [],
-          confidence: Math.min(100, conf),
-          strategy: mode,
-          isReal: cfg.realTradeEnabled,
-          triggerDigit: res.triggerDigit,
-          triggerDesc: res.triggerDesc,
-          startTickIndex: null,
-          startTime: null
-        };
-        signals.push(sig); if (signals.length > 50) signals.shift(); recordSessionTrade(sig); updateSignalsUI();
-        if (cfg.realTradeEnabled) { realExecState = 'OPEN_PENDING'; realLockReason = 'EXECUTING'; updateRealUI(); executeRealTrade(res.type); }
-      }
+      const sig = {
+        type: res.type,
+        price: t0.price,
+        time: t0.epoch,
+        result: 'PENDING',
+        ticksAfter: [],
+        confidence: Math.min(100, conf),
+        strategy: mode,
+        isReal: cfg.realTradeEnabled,
+        triggerDigit: res.triggerDigit,
+        triggerDesc: res.triggerDesc,
+        startTickIndex: null,
+        startTime: null
+      };
+      signals.push(sig); if (signals.length > 50) signals.shift(); recordSessionTrade(sig); updateSignalsUI();
+      if (cfg.realTradeEnabled) { realExecState = 'OPEN_PENDING'; realLockReason = 'EXECUTING'; updateRealUI(); executeRealTrade(res.type); }
     }
     return null;
   }
