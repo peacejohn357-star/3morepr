@@ -43,7 +43,7 @@
   let signals = [], sessionTradesAll = [];
   let tickSeq = 0, lastSignalTickIndex = -999, upStreak = 0, downStreak = 0;
   let lastTickProcessedAt = 0, lastSignalEvalAt = 0, watchdogInterval = null, evalErrorCount = 0;
-  let realExecState = 'IDLE', realTrades = [], realOpenCount = 0, realWins = 0, realLosses = 0, realPnl = 0, realLockReason = '', lastRealTradeAt = 0, lastTradeClosedAt = 0, lastTradeClosedTick = -999, realExecTimer = null, lastSeenPnL = 0;
+  let realExecState = 'IDLE', realTrades = [], realOpenCount = 0, realWins = 0, realLosses = 0, realPnl = 0, realLockReason = '', lastRealTradeAt = 0, lastTradeClosedAt = 0, lastTradeClosedTick = -999, realExecTimer = null, lastSeenPnL = 0, lastKnownBalance = 0;
   let flyoutObserver = null, ws = null, wsState = 'disconnected', reconnectTimer = null, resolvedSymbol = null, manualClose = false, reconnectDelay = RECONNECT_BASE, failCount = 0, usingFallback = false;
 
   // UI Cache to prevent redundant DOM updates
@@ -299,17 +299,17 @@
     const checkPowerStep = () => {
       const isDigit2Edge = (t0.lastDigit === 2 || tMinus1.lastDigit === 2);
       const isPowerMove = Math.abs(t0.deltaSteps) >= 2;
-      if (isDigit2Edge && isPowerMove) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 98, triggerDesc: 'POWER-PIVOT', triggerDigit: 2 };
+      if (isDigit2Edge && isPowerMove) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 98, triggerDesc: 'POWER-PIVOT', triggerDigit: t0.lastDigit, startTickIndex: tickSeq + 1 };
       return null;
     };
     const checkMomentumIgnition = () => {
       const isIgnition = Math.abs(t0.acceleration) > 0.0015 && Math.abs(t0.deltaSteps) === 1;
-      if (isIgnition && streak <= 2) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 90, triggerDesc: 'MOMENTUM-IGN' };
+      if (isIgnition && streak <= 2) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 90, triggerDesc: 'MOMENTUM-IGN', triggerDigit: t0.lastDigit, startTickIndex: tickSeq + 1 };
       return null;
     };
     const checkReversalFlip = () => {
       const isFlip = Math.sign(tMinus1.speed) !== Math.sign(t0.speed);
-      if (isFlip && Math.abs(t0.acceleration) > 0.002) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 95, triggerDesc: 'EXPLOSIVE-FLIP' };
+      if (isFlip && Math.abs(t0.acceleration) > 0.002) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 95, triggerDesc: 'EXPLOSIVE-FLIP', triggerDigit: t0.lastDigit, startTickIndex: tickSeq + 1 };
       return null;
     };
     const checkIgnition = () => {
@@ -355,7 +355,15 @@
     else if (mode === 'reversal') res = checkReversal() || checkReversalFlip();
 
     if (res) {
-      const currentTickIndex = tickSeq;
+      // --- UNLEASHED SAFETY GUARDS ---
+      // 1. Acceleration Cap (Gapping Prevention)
+      if (Math.abs(t0.acceleration) > 0.005) res = null;
+
+      // 2. SELL "Dead End" Digit Filter
+      if (res && res.type === 'SELL' && t0.lastDigit < 2) res = null;
+
+      if (res) {
+        const currentTickIndex = tickSeq;
       if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks || Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs || realExecState !== 'IDLE') return null;
       lastSignalTickIndex = currentTickIndex;
       let conf = res.conf;
@@ -370,10 +378,10 @@
         confidence: Math.min(100, conf),
         strategy: mode,
         isReal: cfg.realTradeEnabled,
-        triggerDigit: res.triggerDigit,
+          triggerDigit: res.triggerDigit || t0.lastDigit,
         triggerDesc: res.triggerDesc,
-        startTickIndex: null,
-        startTime: null
+          startTickIndex: res.startTickIndex || tickSeq + 1,
+          startTime: Date.now()
       };
       signals.push(sig); if (signals.length > 50) signals.shift(); recordSessionTrade(sig); updateSignalsUI();
       if (cfg.realTradeEnabled) { realExecState = 'OPEN_PENDING'; realLockReason = 'EXECUTING'; updateRealUI(); executeRealTrade(res.type); }
@@ -442,6 +450,30 @@
   function loadCfg() { const stored = safeStorage('get', 'tt-cfg'); return Object.assign({ strategyMode: 'hybrid', epsilon: 0.2, minIntensity: 1.2, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true }, stored || {}); }
   function applyConfigToUI() { const dbg = document.getElementById('tt-cfg-debug'), re = document.getElementById('tt-cfg-real-enabled'), mode = document.getElementById('tt-cfg-strategy-mode'), eps = document.getElementById('tt-cfg-epsilon'), intensity = document.getElementById('tt-cfg-intensity'); if (dbg) dbg.checked = cfg.debugSignals; if (re) re.checked = !!cfg.realTradeEnabled; if (mode) mode.value = cfg.strategyMode; if (eps) eps.value = cfg.epsilon; if (intensity) intensity.value = cfg.minIntensity || 1.2; updateRealUI(); }
   function startWatchdog() { if (watchdogInterval) clearInterval(watchdogInterval); watchdogInterval = setInterval(() => { const now = Date.now(); if (wsState !== 'connected') return; if (lastTickProcessedAt > 0 && now - lastTickProcessedAt > WATCHDOG_TICK_TIMEOUT) { if (ws) ws.close(); scheduleReconnect(); } }, WATCHDOG_INTERVAL); }
+
+  function updateLastBalance() {
+    const el = document.querySelector('.acc-info__balance') || document.querySelector('.account-header__content-header + div');
+    if (el) {
+      const val = parseFloat(el.innerText.replace(/[^0-9.-]+/g, ""));
+      if (!isNaN(val)) lastKnownBalance = val;
+    }
+  }
+
+  function settleTradeByBalance(sig) {
+    setTimeout(() => {
+      const el = document.querySelector('.acc-info__balance') || document.querySelector('.account-header__content-header + div');
+      if (!el) return;
+      const newBalance = parseFloat(el.innerText.replace(/[^0-9.-]+/g, ""));
+      if (isNaN(newBalance)) return;
+      const diff = newBalance - lastKnownBalance;
+      if (Math.abs(diff) > 0.01) {
+        const result = diff > 0 ? 'WIN' : 'LOSS';
+        console.log(`[Settlement] Result: ${result} | PnL: ${diff.toFixed(2)}`);
+        finalizeRealTrade({ pnl: diff, result: result });
+        lastKnownBalance = newBalance;
+      }
+    }, 5000);
+  }
   let subObserver = null, lastFlyoutNode = null;
   function setupFlyoutObserver() {
     if (flyoutObserver) return;
@@ -583,9 +615,11 @@
       if (!await setRealTradeSide(buyLabel, activeClass)) throw new Error('side_failed');
       if (!await waitRealBuyReady()) throw new Error('not_ready');
       const btn = document.querySelector(SEL_PURCHASE_BTN); if (!btn || !btn.classList.contains(activeClass)) throw new Error('btn_mismatch');
+      updateLastBalance();
       simulateExternalClick(btn); lastRealTradeAt = Date.now();
       const signalToMark = signals.find(s => s.result === 'PENDING' && s.isReal);
       realTrades.push({ time: Date.now(), signal: side, side: buyLabel, result: 'PENDING', signalRef: signalToMark, startTickIndex: null, startTime: null });
+      if (signalToMark) settleTradeByBalance(signalToMark);
       realExecTimer = setTimeout(() => { if (['OPEN_PENDING', 'OPEN'].includes(realExecState)) { realExecState = 'RECOVERY'; realLockReason = 'TIMEOUT'; updateRealUI(); } }, cfg.realTimeoutMs);
     } catch (e) { realLockReason = 'ERR:' + e.message; updateRealUI(); setTimeout(() => { if (realExecState === 'OPEN_PENDING') { realExecState = 'IDLE'; realLockReason = ''; updateRealUI(); } }, 3000); }
   }
@@ -612,6 +646,6 @@
     }
     return false;
   }
-  function init() { if (document.getElementById('tt-overlay')) return; cfg = loadCfg(); buildOverlay(); connect(); startWatchdog(); setupFlyoutObserver(); window._tt_cfg = cfg; window._tt_detect = detectSignal; }
+  function init() { if (document.getElementById('tt-overlay')) return; cfg = loadCfg(); buildOverlay(); connect(); startWatchdog(); updateLastBalance(); setupFlyoutObserver(); window._tt_cfg = cfg; window._tt_detect = detectSignal; }
   if (document.body) init(); else document.addEventListener('DOMContentLoaded', init);
 })();
