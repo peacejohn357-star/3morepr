@@ -34,7 +34,15 @@
     postTradeCooldownTicks: 5,
     postTradeCooldownMs: 5000,
     debugSignals: true,
-    minADX: 25,
+    adxMin: 25,
+    adxMax: 60,
+    adxPeriod: 14,
+    rsiPeriod: 14,
+    rsiBuyMin: 60,
+    rsiBuyMax: 75,
+    rsiSellMin: 30,
+    rsiSellMax: 40,
+    trendEmaPeriod: 15,
     minBBWidth: 0.2,
   };
 
@@ -68,6 +76,7 @@
         <div class="tt-row"><span class="tt-label">S_Low / S_High</span><span class="tt-val" id="tt-speed-stats">0.00 / 0.00</span></div>
         <div class="tt-row"><span class="tt-label">Mean / Std</span><span class="tt-val" id="tt-speed-dist">0.00 / 0.00</span></div>
         <div class="tt-row"><span class="tt-label">ADX / BB_W</span><span class="tt-val" id="tt-adx-stats">0 / 0.00</span></div>
+        <div class="tt-row"><span class="tt-label">RSI / Trend</span><span class="tt-val" id="tt-rsi-stats">0 / 0.00</span></div>
         <div class="tt-row"><span class="tt-label">Session W/L</span><span class="tt-val"><span id="tt-wins">0</span> / <span id="tt-losses">0</span></span></div>
         <div id="tt-signals-list"></div>
         <div class="tt-config-section-label">Real Execution</div>
@@ -80,7 +89,12 @@
         <button id="tt-config-toggle">Settings</button>
         <div id="tt-config">
           <div class="tt-config-row"><label>Mode</label><select id="tt-cfg-strategy-mode"><option value="unleashed">🔥 Unleashed High-Activity</option><option value="trendIgnition">🚀 Trend Ignition</option><option value="reversalIgnition">🔄 Reversal Ignition</option><option value="ignitionSuite">Full Ignition Suite</option><option value="ignition">Ignition</option><option value="structural3">Structural 3</option><option value="structural2">Structural 2</option><option value="structural">Structural</option><option value="hybrid">Hybrid</option><option value="momentum">Momentum</option><option value="reversal">Reversal</option></select></div>
-          <div class="tt-config-row"><label>Min ADX</label><input type="number" id="tt-cfg-min-adx" min="0" max="100" step="1" value="25"></div>
+          <div class="tt-config-row"><label>Trend EMA Period</label><input type="number" id="tt-cfg-trend-ema" min="2" max="100" step="1" value="15"></div>
+          <div class="tt-config-row"><label>ADX Period</label><input type="number" id="tt-cfg-adx-period" min="2" max="100" step="1" value="14"></div>
+          <div class="tt-config-row"><label>ADX Range</label><div style="display:flex;gap:4px;"><input type="number" id="tt-cfg-adx-min" min="0" max="100" step="1" style="width:50px;" value="25"><input type="number" id="tt-cfg-adx-max" min="0" max="100" step="1" style="width:50px;" value="60"></div></div>
+          <div class="tt-config-row"><label>RSI Period</label><input type="number" id="tt-cfg-rsi-period" min="2" max="100" step="1" value="14"></div>
+          <div class="tt-config-row"><label>RSI Buy Range</label><div style="display:flex;gap:4px;"><input type="number" id="tt-cfg-rsi-buy-min" min="0" max="100" step="1" style="width:50px;" value="60"><input type="number" id="tt-cfg-rsi-buy-max" min="0" max="100" step="1" style="width:50px;" value="75"></div></div>
+          <div class="tt-config-row"><label>RSI Sell Range</label><div style="display:flex;gap:4px;"><input type="number" id="tt-cfg-rsi-sell-min" min="0" max="100" step="1" style="width:50px;" value="30"><input type="number" id="tt-cfg-rsi-sell-max" min="0" max="100" step="1" style="width:50px;" value="40"></div></div>
           <div class="tt-config-row"><label>Min BB Width</label><input type="number" id="tt-cfg-min-bbw" min="0" max="2" step="0.05" value="0.2"></div>
           <div class="tt-config-row"><label>Intensity (Min)</label><input type="number" id="tt-cfg-intensity" min="0.5" max="3" step="0.1" value="1.2"></div>
           <div class="tt-config-row"><label>Epsilon</label><input type="number" id="tt-cfg-epsilon" min="0" max="1" step="0.01" value="0.2"></div>
@@ -123,8 +137,16 @@
     document.getElementById('tt-close-btn').addEventListener('click', () => { manualClose = true; if (reconnectTimer) clearTimeout(reconnectTimer); if (ws) ws.close(); el.remove(); });
     document.getElementById('tt-config-toggle').addEventListener('click', () => document.getElementById('tt-config').classList.toggle('tt-open'));
     document.getElementById('tt-cfg-strategy-mode').addEventListener('change', function () { cfg.strategyMode = this.value; saveCfg(); });
-    document.getElementById('tt-cfg-min-adx').addEventListener('change', function () { cfg.minADX = parseFloat(this.value) || 0; saveCfg(); });
-    document.getElementById('tt-cfg-min-bbw').addEventListener('change', function () { cfg.minBBWidth = parseFloat(this.value) || 0; saveCfg(); });
+    document.getElementById('tt-cfg-trend-ema').addEventListener('change', function () { cfg.trendEmaPeriod = parseInt(this.value) || 15; saveCfg(); });
+    document.getElementById('tt-cfg-adx-period').addEventListener('change', function () { cfg.adxPeriod = parseInt(this.value) || 14; saveCfg(); });
+    document.getElementById('tt-cfg-adx-min').addEventListener('change', function () { cfg.adxMin = parseFloat(this.value) || 25; saveCfg(); });
+    document.getElementById('tt-cfg-adx-max').addEventListener('change', function () { cfg.adxMax = parseFloat(this.value) || 60; saveCfg(); });
+    document.getElementById('tt-cfg-rsi-period').addEventListener('change', function () { cfg.rsiPeriod = parseInt(this.value) || 14; saveCfg(); });
+    document.getElementById('tt-cfg-rsi-buy-min').addEventListener('change', function () { cfg.rsiBuyMin = parseFloat(this.value) || 60; saveCfg(); });
+    document.getElementById('tt-cfg-rsi-buy-max').addEventListener('change', function () { cfg.rsiBuyMax = parseFloat(this.value) || 75; saveCfg(); });
+    document.getElementById('tt-cfg-rsi-sell-min').addEventListener('change', function () { cfg.rsiSellMin = parseFloat(this.value) || 30; saveCfg(); });
+    document.getElementById('tt-cfg-rsi-sell-max').addEventListener('change', function () { cfg.rsiSellMax = parseFloat(this.value) || 40; saveCfg(); });
+    document.getElementById('tt-cfg-min-bbw').addEventListener('change', function () { cfg.minBBWidth = parseFloat(this.value) || 0.2; saveCfg(); });
     document.getElementById('tt-cfg-intensity').addEventListener('change', function () { cfg.minIntensity = parseFloat(this.value) || 1.2; saveCfg(); });
     document.getElementById('tt-cfg-epsilon').addEventListener('change', function () { cfg.epsilon = parseFloat(this.value) || 0.2; saveCfg(); });
     document.getElementById('tt-cfg-debug').addEventListener('change', function () { cfg.debugSignals = this.checked; saveCfg(); });
@@ -195,11 +217,24 @@
       const el = document.getElementById('tt-adx-stats');
       if (el) {
         el.textContent = adxVal;
-        const minADX = cfg.minADX || 25;
+        const amin = cfg.adxMin || 25, amax = cfg.adxMax || 60;
         const minBBW = cfg.minBBWidth || 0.2;
-        el.style.color = (currentADX >= minADX && bbWidth >= minBBW) ? '#3ecf60' : '#7a8499';
+        el.style.color = (currentADX >= amin && currentADX <= amax && bbWidth >= minBBW) ? '#3ecf60' : '#7a8499';
       }
       lastUI.adx = adxVal;
+    }
+
+    const currentRSI = t0?.rsi || 50;
+    const currentTrend = t0?.trendEma || 0;
+    const rsiTrendVal = `${currentRSI.toFixed(1)} / ${currentTrend.toFixed(2)}`;
+    if (lastUI.rsiTrend !== rsiTrendVal) {
+      const el = document.getElementById('tt-rsi-stats');
+      if (el) {
+        el.textContent = rsiTrendVal;
+        const isUp = t0?.price > currentTrend;
+        el.style.color = isUp ? '#3ecf60' : '#e04040';
+      }
+      lastUI.rsiTrend = rsiTrendVal;
     }
   }
 
@@ -229,13 +264,14 @@
     const accel = acceleration; // Alias for compatibility with previous updates
     const intensity = Math.abs(speed) / (speedMean || 0.0007);
     const deltaChangeVal = prevTick ? deltaSteps - prevTick.deltaSteps : 0;
-    const k = 2 / (10 + 1);
-    const ema10 = prevTick ? (price * k + (prevTick.ema10 || price) * (1 - k)) : price;
+    const kTrend = 2 / ((cfg.trendEmaPeriod || 15) + 1);
+    const trendEma = prevTick ? (price * kTrend + (prevTick.trendEma || price) * (1 - kTrend)) : price;
 
     let adx = 0;
-    if (ticks.length >= 14) {
+    const adxP = cfg.adxPeriod || 14;
+    if (ticks.length >= adxP) {
       let trSum = 0, pdmSum = 0, mdmSum = 0;
-      for (let i = 0; i < 14; i++) {
+      for (let i = 0; i < adxP; i++) {
         const curr = i === 0 ? { price } : ticks[ticks.length - i];
         const prev = i === 0 ? ticks[ticks.length - 1] : ticks[ticks.length - i - 1];
         const tr = Math.abs(curr.price - prev.price);
@@ -246,18 +282,32 @@
       const pDI = trSum > 0 ? (pdmSum / trSum) * 100 : 0;
       const mDI = trSum > 0 ? (mdmSum / trSum) * 100 : 0;
       const dx = (pDI + mDI) > 0 ? (Math.abs(pDI - mDI) / (pDI + mDI)) * 100 : 0;
-      adx = prevTick && prevTick.adx ? (prevTick.adx * 13 + dx) / 14 : dx;
+      adx = prevTick && prevTick.adx ? (prevTick.adx * (adxP - 1) + dx) / adxP : dx;
+    }
+
+    let rsi = 50;
+    const rsiP = cfg.rsiPeriod || 14;
+    if (ticks.length >= rsiP) {
+      let up = 0, down = 0;
+      for (let i = 0; i < rsiP; i++) {
+        const curr = i === 0 ? { price } : ticks[ticks.length - i];
+        const prev = i === 0 ? ticks[ticks.length - 1] : ticks[ticks.length - i - 1];
+        const d = curr.price - prev.price;
+        if (d > 0) up += d; else down += Math.abs(d);
+      }
+      const avgUp = up / rsiP, avgDown = down / rsiP;
+      rsi = avgDown === 0 ? 100 : 100 - (100 / (1 + avgUp / avgDown));
     }
 
     if (ticks.length >= 10) {
       const slice = ticks.slice(-10);
-      const sqDiffSum = slice.reduce((a, b) => a + Math.pow(b.price - ema10, 2), 0);
+      const sqDiffSum = slice.reduce((a, b) => a + Math.pow(b.price - trendEma, 2), 0);
       const stdDev = Math.sqrt(sqDiffSum / 10);
       bbWidth = stdDev * 4; // Upper - Lower = 4 * stdDev
     }
 
     if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
-    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, ema10, adx };
+    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, trendEma, adx, rsi };
     ticks.push(state); if (ticks.length > TICK_BUF) ticks.shift();
     speedHistory.push(absSpeed); if (speedHistory.length > SPEED_BUF) speedHistory.shift();
     calculatePercentiles(); lastTickProcessedAt = Date.now();
@@ -315,10 +365,12 @@
 
     // Filter indicators
     const currentADX = t0.adx || 0;
-    const minADX = cfg.minADX || 25;
+    const currentRSI = t0.rsi || 50;
+    const adxMin = cfg.adxMin || 25;
+    const adxMax = cfg.adxMax || 60;
     const minBBW = cfg.minBBWidth || 0.2;
-    const isTrending = currentADX >= minADX && bbWidth >= minBBW;
-    const emaSlope = t0.ema10 - tMinus1.ema10;
+    const isTrending = (currentADX >= adxMin && currentADX <= adxMax) && bbWidth >= minBBW;
+    const emaSlope = t0.trendEma - tMinus1.trendEma;
 
     // --- STRATEGY HELPERS ---
     const checkStructural = () => {
@@ -409,8 +461,8 @@
       const intensityBypass = t0.intensity > 1.5;
 
       // Use EMA Slope for crossing and trend alignment
-      const earlyCrossing = (tMinus1.price < tMinus1.ema10 && t0.price >= t0.ema10 && emaSlope > 0.005) ? 'BUY' :
-                            (tMinus1.price > tMinus1.ema10 && t0.price <= t0.ema10 && emaSlope < -0.005) ? 'SELL' : null;
+      const earlyCrossing = (tMinus1.price < tMinus1.trendEma && t0.price >= t0.trendEma && emaSlope > 0.005) ? 'BUY' :
+                            (tMinus1.price > tMinus1.trendEma && t0.price <= t0.trendEma && emaSlope < -0.005) ? 'SELL' : null;
 
       if (earlyCrossing) {
         res = { type: earlyCrossing, conf: 92, triggerDesc: 'EARLY-CROSS' };
@@ -424,9 +476,29 @@
                             (res.type === 'SELL' && t0.direction === -1 && tMinus1.direction === -1);
 
         if (!isConfirmed) res = null;
+
+        // RSI Range Filter
+        if (res) {
+          if (res.type === 'BUY') {
+            const rmin = cfg.rsiBuyMin || 60, rmax = cfg.rsiBuyMax || 75;
+            if (currentRSI < rmin || currentRSI > rmax) res = null;
+          } else if (res.type === 'SELL') {
+            const rmin = cfg.rsiSellMin || 30, rmax = cfg.rsiSellMax || 40;
+            if (currentRSI < rmin || currentRSI > rmax) res = null;
+          }
+        }
+
+        // Trend EMA Alignment (Buy above EMA, Sell below EMA)
+        if (res) {
+          if (res.type === 'BUY' && t0.price <= t0.trendEma) res = null;
+          else if (res.type === 'SELL' && t0.price >= t0.trendEma) res = null;
+        }
+
         // Trend Alignment using EMA Slope
-        else if (res.type === 'BUY' && emaSlope < -0.01) res = null;
-        else if (res.type === 'SELL' && emaSlope > 0.01) res = null;
+        if (res) {
+          if (res.type === 'BUY' && emaSlope < -0.01) res = null;
+          else if (res.type === 'SELL' && emaSlope > 0.01) res = null;
+        }
       }
     }
     else if (mode === 'ignitionSuite') { if (streak < 4) res = checkReversalFlip() || checkMomentumIgnition(); }
@@ -535,8 +607,41 @@
   }
   function safeStorage(op, key, val) { try { if (op === 'get') return JSON.parse(localStorage.getItem(key)); if (op === 'set') localStorage.setItem(key, JSON.stringify(val)); } catch (_) { } return null; }
   function saveCfg() { safeStorage('set', 'tt-cfg', cfg); }
-  function loadCfg() { const stored = safeStorage('get', 'tt-cfg'); return Object.assign({ strategyMode: 'hybrid', epsilon: 0.2, minIntensity: 1.2, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true, minADX: 25, minBBWidth: 0.2 }, stored || {}); }
-  function applyConfigToUI() { const dbg = document.getElementById('tt-cfg-debug'), re = document.getElementById('tt-cfg-real-enabled'), mode = document.getElementById('tt-cfg-strategy-mode'), eps = document.getElementById('tt-cfg-epsilon'), intensity = document.getElementById('tt-cfg-intensity'), madx = document.getElementById('tt-cfg-min-adx'), mbbw = document.getElementById('tt-cfg-min-bbw'); if (dbg) dbg.checked = cfg.debugSignals; if (re) re.checked = !!cfg.realTradeEnabled; if (mode) mode.value = cfg.strategyMode; if (eps) eps.value = cfg.epsilon; if (intensity) intensity.value = cfg.minIntensity || 1.2; if (madx) madx.value = cfg.minADX || 25; if (mbbw) mbbw.value = cfg.minBBWidth || 0.2; updateRealUI(); }
+  function loadCfg() { const stored = safeStorage('get', 'tt-cfg'); return Object.assign({ strategyMode: 'hybrid', epsilon: 0.2, minIntensity: 1.2, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true, adxMin: 25, adxMax: 60, adxPeriod: 14, rsiPeriod: 14, rsiBuyMin: 60, rsiBuyMax: 75, rsiSellMin: 30, rsiSellMax: 40, trendEmaPeriod: 15, minBBWidth: 0.2 }, stored || {}); }
+  function applyConfigToUI() {
+    const dbg = document.getElementById('tt-cfg-debug'),
+          re = document.getElementById('tt-cfg-real-enabled'),
+          mode = document.getElementById('tt-cfg-strategy-mode'),
+          eps = document.getElementById('tt-cfg-epsilon'),
+          intensity = document.getElementById('tt-cfg-intensity'),
+          mbbw = document.getElementById('tt-cfg-min-bbw'),
+          adxMin = document.getElementById('tt-cfg-adx-min'),
+          adxMax = document.getElementById('tt-cfg-adx-max'),
+          adxPeriod = document.getElementById('tt-cfg-adx-period'),
+          rsiPeriod = document.getElementById('tt-cfg-rsi-period'),
+          rsiBuyMin = document.getElementById('tt-cfg-rsi-buy-min'),
+          rsiBuyMax = document.getElementById('tt-cfg-rsi-buy-max'),
+          rsiSellMin = document.getElementById('tt-cfg-rsi-sell-min'),
+          rsiSellMax = document.getElementById('tt-cfg-rsi-sell-max'),
+          trendEma = document.getElementById('tt-cfg-trend-ema');
+
+    if (dbg) dbg.checked = cfg.debugSignals;
+    if (re) re.checked = !!cfg.realTradeEnabled;
+    if (mode) mode.value = cfg.strategyMode;
+    if (eps) eps.value = cfg.epsilon;
+    if (intensity) intensity.value = cfg.minIntensity || 1.2;
+    if (mbbw) mbbw.value = cfg.minBBWidth || 0.2;
+    if (adxMin) adxMin.value = cfg.adxMin || 25;
+    if (adxMax) adxMax.value = cfg.adxMax || 60;
+    if (adxPeriod) adxPeriod.value = cfg.adxPeriod || 14;
+    if (rsiPeriod) rsiPeriod.value = cfg.rsiPeriod || 14;
+    if (rsiBuyMin) rsiBuyMin.value = cfg.rsiBuyMin || 60;
+    if (rsiBuyMax) rsiBuyMax.value = cfg.rsiBuyMax || 75;
+    if (rsiSellMin) rsiSellMin.value = cfg.rsiSellMin || 30;
+    if (rsiSellMax) rsiSellMax.value = cfg.rsiSellMax || 40;
+    if (trendEma) trendEma.value = cfg.trendEmaPeriod || 15;
+    updateRealUI();
+  }
   function startWatchdog() { if (watchdogInterval) clearInterval(watchdogInterval); watchdogInterval = setInterval(() => { const now = Date.now(); if (wsState !== 'connected') return; if (lastTickProcessedAt > 0 && now - lastTickProcessedAt > WATCHDOG_TICK_TIMEOUT) { if (ws) ws.close(); scheduleReconnect(); } }, WATCHDOG_INTERVAL); }
   let subObserver = null, lastFlyoutNode = null;
   function setupFlyoutObserver() {
