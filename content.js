@@ -55,7 +55,7 @@
   let tickSeq = 0, lastSignalTickIndex = -999, upStreak = 0, downStreak = 0;
   let lastTickProcessedAt = 0, lastSignalEvalAt = 0, watchdogInterval = null, evalErrorCount = 0;
   let realExecState = 'IDLE', realTrades = [], realOpenCount = 0, realWins = 0, realLosses = 0, realPnl = 0, realLockReason = '', lastRealTradeAt = 0, lastTradeClosedAt = 0, lastTradeClosedTick = -999, realExecTimer = null, lastSeenPnL = 0, lastSeenResult = null;
-  let flyoutObserver = null, ws = null, wsState = 'disconnected', reconnectTimer = null, resolvedSymbol = null, manualClose = false, reconnectDelay = RECONNECT_BASE, failCount = 0, usingFallback = false;
+  let flyoutObserver = null, ws = null, wsState = 'disconnected', reconnectTimer = null, resolvedSymbol = null, manualClose = false, reconnectDelay = RECONNECT_BASE, failCount = 0, usingFallback = false, finalizationTimer = null;
 
   // UI Cache to prevent redundant DOM updates
   let lastUI = { state: '', pnl: null, wins: -1, losses: -1, price: '', stats: '', dist: '', dirStreak: '' };
@@ -656,10 +656,17 @@
         }
       } else {
         if (subObserver) { subObserver.disconnect(); subObserver = null; lastFlyoutNode = null; }
-        if (realExecState === 'OPEN' || realExecState === 'RECOVERY' || realExecState === 'OPEN_PENDING') {
-          realOpenCount = 0;
-          finalizeRealTrade({ pnl: lastSeenPnL, result: lastSeenResult || (lastSeenPnL > 0 ? 'WIN' : 'LOSS') });
-          realExecState = 'IDLE'; realLockReason = ''; lastSeenPnL = 0; lastSeenResult = null; updateRealUI();
+        if (realExecState === 'OPEN' || realExecState === 'RECOVERY') {
+          if (finalizationTimer) clearTimeout(finalizationTimer);
+          finalizationTimer = setTimeout(() => {
+              if (!document.querySelector(SEL_FLYOUT)) {
+                  realOpenCount = 0;
+                  const finalResult = lastSeenResult || (lastSeenPnL > 0 ? 'WIN' : 'LOSS');
+                  finalizeRealTrade({ pnl: lastSeenPnL, result: finalResult });
+                  realExecState = 'IDLE'; realLockReason = ''; lastSeenPnL = 0; lastSeenResult = null; updateRealUI();
+              }
+              finalizationTimer = null;
+          }, 1000);
         }
       }
     });
@@ -670,8 +677,8 @@
       const text = flyout.innerText;
 
       // Purchase confirmation
-      if (text.includes("Contract bought") || text.includes("ID:")) {
-        const sig = signals.find(s => s.result === 'PENDING' && s.isReal && !s.startTickIndex);
+      if (text.includes("Contract bought") || text.includes("ID:") || text.includes("Reference ID")) {
+        const sig = signals.find(s => s.result === 'PENDING' && s.isReal && !s.confirmMetrics);
         if (sig) {
           sig.startTickIndex = tickSeq + 1; sig.startTime = Date.now();
           const t0 = ticks[ticks.length - 1];
@@ -709,7 +716,13 @@
       }
 
       const noOpen = text.includes('no open positions');
+      const hasActiveCard = !!flyout.querySelector('.dc-contract-card');
       const flyoutCount = noOpen ? 0 : (text.match(/(\d+)\s+open\s+position/i) ? parseInt(text.match(/(\d+)\s+open\s+position/i)[1], 10) : realOpenCount);
+
+      if (flyoutCount === 0 && !hasActiveCard && (realExecState === 'OPEN' || realExecState === 'RECOVERY')) {
+          finalizeRealTrade({ pnl: lastSeenPnL, result: lastSeenResult || (lastSeenPnL > 0 ? 'WIN' : 'LOSS') });
+          realExecState = 'IDLE'; realLockReason = ''; lastSeenPnL = 0; lastSeenResult = null; updateRealUI();
+      }
 
       if (flyoutCount !== realOpenCount) {
         realOpenCount = flyoutCount;
