@@ -206,8 +206,10 @@
     const accel = acceleration; // Alias for compatibility with previous updates
     const intensity = Math.abs(speed) / (speedMean || 0.0007);
     const deltaChangeVal = prevTick ? deltaSteps - prevTick.deltaSteps : 0;
+    const k = 2 / (10 + 1);
+    const ema10 = prevTick ? (price * k + (prevTick.ema10 || price) * (1 - k)) : price;
     if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
-    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration };
+    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, ema10 };
     ticks.push(state); if (ticks.length > TICK_BUF) ticks.shift();
     speedHistory.push(absSpeed); if (speedHistory.length > SPEED_BUF) speedHistory.shift();
     calculatePercentiles(); lastTickProcessedAt = Date.now();
@@ -341,29 +343,16 @@
     };
 
     let res = null;
-    // --- MICRO-BREAKOUT TREND FILTER ---
-    const hist = ticks.slice(-6);
-    let localHigh = -Infinity, localLow = Infinity;
-    if (hist.length >= 6) {
-      for (let i = 0; i < hist.length - 1; i++) {
-        if (hist[i].price > localHigh) localHigh = hist[i].price;
-        if (hist[i].price < localLow) localLow = hist[i].price;
-      }
-    }
+    // --- TREND DIRECTION FILTER ---
+    const slope = ticks.length >= 10 ? (t0.price - ticks[ticks.length - 10].price) : 0;
 
     // Evaluation Logic
     if (mode === 'unleashed') {
       res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
-      // Breakout Guard: Only enter if price is breaking the recent micro-range
+      // Trend Alignment: Sell in downtrends, Buy in uptrends
       if (res) {
-        if (res.type === 'BUY' && t0.price < localHigh) res = null;
-        if (res.type === 'SELL' && t0.price > localLow) res = null;
-
-        // Sample-Based Digit Refinement (Preventing clusters)
-        if (res) {
-          if (res.type === 'BUY' && [0, 1, 5, 8].includes(t0.lastDigit)) res = null;
-          if (res.type === 'SELL' && [2, 7, 9].includes(t0.lastDigit)) res = null;
-        }
+        if (slope > 0.1 && res.type === 'SELL') res = null;
+        if (slope < -0.1 && res.type === 'BUY') res = null;
       }
     }
     else if (mode === 'ignitionSuite') { if (streak < 4) res = checkReversalFlip() || checkMomentumIgnition(); }
@@ -547,9 +536,7 @@
       // Detection of terminal state
       const isClosed = text.includes('Closed') || /Contract\s+value:\s*0\.00/i.test(text);
 
-      if (isClosed) {
-        closedResult = { pnl: lastSeenPnL, result: isDefiniteLoss ? 'LOSS' : 'WIN' };
-      } else if (text.includes('no open positions') && realExecState === 'OPEN') {
+      if (isClosed || (text.includes('no open positions') && realExecState === 'OPEN')) {
         closedResult = { pnl: lastSeenPnL, result: isDefiniteLoss ? 'LOSS' : 'WIN' };
       }
 
