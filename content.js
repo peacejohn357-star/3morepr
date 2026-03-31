@@ -521,10 +521,19 @@
         confidence: Math.min(100, conf),
         strategy: mode,
         isReal: cfg.realTradeEnabled,
-          triggerDigit: res.triggerDigit || t0.lastDigit,
+        triggerDigit: res.triggerDigit || t0.lastDigit,
         triggerDesc: res.triggerDesc,
-          startTickIndex: res.startTickIndex || tickSeq + 1,
-          startTime: Date.now()
+        startTickIndex: res.startTickIndex || tickSeq + 1,
+        startTime: Date.now(),
+        metrics: {
+          rsi: t0.rsi,
+          adx: t0.adx,
+          bbw: bbWidth,
+          intensity: t0.intensity,
+          epsilon: t0.deltaChange,
+          sLow: sLow,
+          sHigh: sHigh
+        }
       };
         signals.push(sig); if (signals.length > 50) signals.shift(); recordSessionTrade(sig); updateSignalsUI();
         if (cfg.realTradeEnabled) { realExecState = 'OPEN_PENDING'; realLockReason = 'EXECUTING'; updateRealUI(); executeRealTrade(res.type); }
@@ -576,15 +585,20 @@
   function recordSessionTrade(sig) { sessionTradesAll.push(sig); if (sessionTradesAll.length > SESSION_HISTORY_CAP) sessionTradesAll.shift(); }
   function exportCSV() {
     if (!sessionTradesAll.length) return;
-    const rows = [['Type', 'Strategy', 'Confidence', 'Price', 'Time', 'Result', 'Trigger Digit', 'Trigger Desc', 'Start Tick', 'Confirm Time']].concat(sessionTradesAll.map(s => [s.type, s.strategy, s.confidence, s.price.toFixed(2), s.time, s.result, s.triggerDigit ?? '', s.triggerDesc ?? '', s.startTickIndex ?? '', s.startTime ? new Date(s.startTime).toISOString() : '']));
+    const head = ['Type', 'Strategy', 'Price', 'Time', 'Result', 'Digit', 'Desc', 'Sig RSI', 'Sig ADX', 'Sig BBW', 'Sig Int', 'Sig Eps', 'Sig SLow', 'Sig SHigh', 'Conf RSI', 'Conf ADX', 'Conf BBW', 'Conf Int', 'Conf Eps', 'Conf SLow', 'Conf SHigh'];
+    const rows = [head].concat(sessionTradesAll.map(s => {
+      const m = s.metrics || {}, cm = s.confirmMetrics || {};
+      return [s.type, s.strategy, s.price.toFixed(2), s.time, s.result, s.triggerDigit ?? '', s.triggerDesc ?? '', m.rsi??'', m.adx??'', m.bbw??'', m.intensity??'', m.epsilon??'', m.sLow??'', m.sHigh??'', cm.rsi??'', cm.adx??'', cm.bbw??'', cm.intensity??'', cm.epsilon??'', cm.sLow??'', cm.sHigh??''];
+    }));
     const csv = rows.map(r => r.join(',')).join('\n'); const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = '3tick-signals.csv'; a.click();
   }
   function exportRealCSV() {
     if (!realTrades.length) return;
-    const rows = [['Time', 'Signal', 'Side', 'Result', 'PnL', 'Trigger Digit', 'Trigger Desc', 'Start Tick', 'Confirm Time']].concat(realTrades.map(t => {
-      const s = t.signalRef || {};
-      return [new Date(t.time).toISOString(), t.signal, t.side, t.result, t.pnl || '', s.triggerDigit ?? '', s.triggerDesc ?? '', t.startTickIndex ?? '', t.startTime ? new Date(t.startTime).toISOString() : ''];
+    const head = ['Time', 'Side', 'Result', 'PnL', 'Digit', 'Desc', 'Sig RSI', 'Sig ADX', 'Sig BBW', 'Sig Int', 'Sig Eps', 'Sig SLow', 'Sig SHigh', 'Conf RSI', 'Conf ADX', 'Conf BBW', 'Conf Int', 'Conf Eps', 'Conf SLow', 'Conf SHigh'];
+    const rows = [head].concat(realTrades.map(t => {
+      const s = t.signalRef || {}, m = s.metrics || {}, cm = t.confirmMetrics || {};
+      return [new Date(t.time).toISOString(), t.side, t.result, t.pnl || '', s.triggerDigit ?? '', s.triggerDesc ?? '', m.rsi??'', m.adx??'', m.bbw??'', m.intensity??'', m.epsilon??'', m.sLow??'', m.sHigh??'', cm.rsi??'', cm.adx??'', cm.bbw??'', cm.intensity??'', cm.epsilon??'', cm.sLow??'', cm.sHigh??''];
     }));
     const csv = rows.map(r => r.join(',')).join('\n'); const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = '3tick-real.csv'; a.click();
@@ -660,8 +674,24 @@
         const sig = signals.find(s => s.result === 'PENDING' && s.isReal && !s.startTickIndex);
         if (sig) {
           sig.startTickIndex = tickSeq + 1; sig.startTime = Date.now();
+          const t0 = ticks[ticks.length - 1];
+          if (t0) {
+            sig.confirmMetrics = {
+              rsi: t0.rsi,
+              adx: t0.adx,
+              bbw: bbWidth,
+              intensity: t0.intensity,
+              epsilon: t0.deltaChange,
+              sLow: sLow,
+              sHigh: sHigh
+            };
+          }
           const real = realTrades.find(t => t.result === 'PENDING' && !t.startTickIndex);
-          if (real) { real.startTickIndex = sig.startTickIndex; real.startTime = sig.startTime; }
+          if (real) {
+            real.startTickIndex = sig.startTickIndex;
+            real.startTime = sig.startTime;
+            real.confirmMetrics = sig.confirmMetrics;
+          }
         }
       }
 
