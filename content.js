@@ -34,12 +34,14 @@
     postTradeCooldownTicks: 5,
     postTradeCooldownMs: 5000,
     debugSignals: true,
+    minADX: 25,
+    minBBWidth: 0.2,
   };
 
   // ── State ─────────────────────────────────────────────────────────────────
   let ticks = [];
   let speedHistory = [];
-  let sHigh = 0, sLow = 0, speedMean = 0, speedStd = 0;
+  let sHigh = 0, sLow = 0, speedMean = 0, speedStd = 0, bbWidth = 0;
   let signals = [], sessionTradesAll = [];
   let tickSeq = 0, lastSignalTickIndex = -999, upStreak = 0, downStreak = 0;
   let lastTickProcessedAt = 0, lastSignalEvalAt = 0, watchdogInterval = null, evalErrorCount = 0;
@@ -65,6 +67,7 @@
         <div class="tt-row"><span class="tt-label">Dir / Streak</span><span class="tt-val" id="tt-dir-streak">- / 0</span></div>
         <div class="tt-row"><span class="tt-label">S_Low / S_High</span><span class="tt-val" id="tt-speed-stats">0.00 / 0.00</span></div>
         <div class="tt-row"><span class="tt-label">Mean / Std</span><span class="tt-val" id="tt-speed-dist">0.00 / 0.00</span></div>
+        <div class="tt-row"><span class="tt-label">ADX / BB_W</span><span class="tt-val" id="tt-adx-stats">0 / 0.00</span></div>
         <div class="tt-row"><span class="tt-label">Session W/L</span><span class="tt-val"><span id="tt-wins">0</span> / <span id="tt-losses">0</span></span></div>
         <div id="tt-signals-list"></div>
         <div class="tt-config-section-label">Real Execution</div>
@@ -77,6 +80,8 @@
         <button id="tt-config-toggle">Settings</button>
         <div id="tt-config">
           <div class="tt-config-row"><label>Mode</label><select id="tt-cfg-strategy-mode"><option value="unleashed">🔥 Unleashed High-Activity</option><option value="trendIgnition">🚀 Trend Ignition</option><option value="reversalIgnition">🔄 Reversal Ignition</option><option value="ignitionSuite">Full Ignition Suite</option><option value="ignition">Ignition</option><option value="structural3">Structural 3</option><option value="structural2">Structural 2</option><option value="structural">Structural</option><option value="hybrid">Hybrid</option><option value="momentum">Momentum</option><option value="reversal">Reversal</option></select></div>
+          <div class="tt-config-row"><label>Min ADX</label><input type="number" id="tt-cfg-min-adx" min="0" max="100" step="1" value="25"></div>
+          <div class="tt-config-row"><label>Min BB Width</label><input type="number" id="tt-cfg-min-bbw" min="0" max="2" step="0.05" value="0.2"></div>
           <div class="tt-config-row"><label>Intensity (Min)</label><input type="number" id="tt-cfg-intensity" min="0.5" max="3" step="0.1" value="1.2"></div>
           <div class="tt-config-row"><label>Epsilon</label><input type="number" id="tt-cfg-epsilon" min="0" max="1" step="0.01" value="0.2"></div>
           <div class="tt-config-row"><label>Debug Signals</label><input type="checkbox" id="tt-cfg-debug"></div>
@@ -118,6 +123,8 @@
     document.getElementById('tt-close-btn').addEventListener('click', () => { manualClose = true; if (reconnectTimer) clearTimeout(reconnectTimer); if (ws) ws.close(); el.remove(); });
     document.getElementById('tt-config-toggle').addEventListener('click', () => document.getElementById('tt-config').classList.toggle('tt-open'));
     document.getElementById('tt-cfg-strategy-mode').addEventListener('change', function () { cfg.strategyMode = this.value; saveCfg(); });
+    document.getElementById('tt-cfg-min-adx').addEventListener('change', function () { cfg.minADX = parseFloat(this.value) || 0; saveCfg(); });
+    document.getElementById('tt-cfg-min-bbw').addEventListener('change', function () { cfg.minBBWidth = parseFloat(this.value) || 0; saveCfg(); });
     document.getElementById('tt-cfg-intensity').addEventListener('change', function () { cfg.minIntensity = parseFloat(this.value) || 1.2; saveCfg(); });
     document.getElementById('tt-cfg-epsilon').addEventListener('change', function () { cfg.epsilon = parseFloat(this.value) || 0.2; saveCfg(); });
     document.getElementById('tt-cfg-debug').addEventListener('change', function () { cfg.debugSignals = this.checked; saveCfg(); });
@@ -179,6 +186,9 @@
     if (tickSeq % 5 === 0) {
       const statsVal = `${sLow.toFixed(4)} / ${sHigh.toFixed(4)}`;
       const distVal = `${speedMean.toFixed(4)} / ${speedStd.toFixed(4)}`;
+      const t0 = ticks[ticks.length-1];
+      const adxVal = `${Math.round(t0?.adx || 0)} / ${bbWidth.toFixed(2)}`;
+
       if (lastUI.stats !== statsVal) {
         const el = document.getElementById('tt-speed-stats');
         if (el) el.textContent = statsVal;
@@ -188,6 +198,11 @@
         const el = document.getElementById('tt-speed-dist');
         if (el) el.textContent = distVal;
         lastUI.dist = distVal;
+      }
+      if (lastUI.adx !== adxVal) {
+        const el = document.getElementById('tt-adx-stats');
+        if (el) el.textContent = adxVal;
+        lastUI.adx = adxVal;
       }
     }
   }
@@ -208,8 +223,48 @@
     const deltaChangeVal = prevTick ? deltaSteps - prevTick.deltaSteps : 0;
     const k = 2 / (10 + 1);
     const ema10 = prevTick ? (price * k + (prevTick.ema10 || price) * (1 - k)) : price;
+
+    // ADX (14) Calculation using a 5-tick micro-window to create H/L/C bars
+    let adx = 0, plusDI = 0, minusDI = 0;
+    let smTR = prevTick ? prevTick.smTR : 0;
+    let smPlusDM = prevTick ? prevTick.smPlusDM : 0;
+    let smMinusDM = prevTick ? prevTick.smMinusDM : 0;
+
+    if (ticks.length >= 6) {
+      const windowSize = 5;
+      const currWindow = [state, ...ticks.slice(-windowSize + 1)];
+      const prevWindow = ticks.slice(-windowSize);
+
+      const currH = Math.max(...currWindow.map(t => t.price));
+      const currL = Math.min(...currWindow.map(t => t.price));
+      const currC = price;
+
+      const prevH = Math.max(...prevWindow.map(t => t.price));
+      const prevL = Math.min(...prevWindow.map(t => t.price));
+      const prevC = prevTick.price;
+
+      const tr = Math.max(currH - currL, Math.abs(currH - prevC), Math.abs(currL - prevC));
+      const upMove = currH - prevH;
+      const downMove = prevL - currL;
+
+      const plusDM = (upMove > downMove && upMove > 0) ? upMove : 0;
+      const minusDM = (downMove > upMove && downMove > 0) ? downMove : 0;
+
+      const alphaADX = 1 / 14;
+      smTR = prevTick ? (prevTick.smTR * (1 - alphaADX) + tr) : tr;
+      smPlusDM = prevTick ? (prevTick.smPlusDM * (1 - alphaADX) + plusDM) : plusDM;
+      smMinusDM = prevTick ? (prevTick.smMinusDM * (1 - alphaADX) + minusDM) : minusDM;
+
+      if (smTR > 0) {
+        plusDI = 100 * (smPlusDM / smTR);
+        minusDI = 100 * (smMinusDM / smTR);
+      }
+      const dx = (plusDI + minusDI) > 0 ? (100 * Math.abs(plusDI - minusDI) / (plusDI + minusDI)) : 0;
+      adx = prevTick ? (prevTick.adx * (1 - alphaADX) + dx) : dx;
+    }
+
     if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
-    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, ema10 };
+    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, ema10, smTR, smPlusDM, smMinusDM, plusDI, minusDI, adx: adx || 0 };
     ticks.push(state); if (ticks.length > TICK_BUF) ticks.shift();
 
     // Bollinger Bands (10, EMA, 2)
@@ -220,6 +275,7 @@
       const sumSq = prices.reduce((acc, p) => acc + Math.pow(p - middle, 2), 0);
       const stdDev = Math.sqrt(sumSq / 10);
       state.bb = { middle, upper: middle + (2 * stdDev), lower: middle - (2 * stdDev) };
+      bbWidth = state.bb.upper - state.bb.lower;
     }
 
     speedHistory.push(absSpeed); if (speedHistory.length > SPEED_BUF) speedHistory.shift();
@@ -359,7 +415,12 @@
 
     // Evaluation Logic
     if (mode === 'unleashed') {
-      if (n >= 4) {
+      const minADX = cfg.minADX || 25;
+      const minBBW = cfg.minBBWidth || 0.2;
+      const isStrongTrend = (t0.adx >= minADX);
+      const isExpanding = (bbWidth >= minBBW);
+
+      if (n >= 4 && isStrongTrend && isExpanding) {
         const prev3 = ticks.slice(-4, -1);
         const localHigh = Math.max(...prev3.map(t => t.price));
         const localLow = Math.min(...prev3.map(t => t.price));
@@ -491,8 +552,8 @@
   }
   function safeStorage(op, key, val) { try { if (op === 'get') return JSON.parse(localStorage.getItem(key)); if (op === 'set') localStorage.setItem(key, JSON.stringify(val)); } catch (_) { } return null; }
   function saveCfg() { safeStorage('set', 'tt-cfg', cfg); }
-  function loadCfg() { const stored = safeStorage('get', 'tt-cfg'); return Object.assign({ strategyMode: 'hybrid', epsilon: 0.2, minIntensity: 1.2, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true }, stored || {}); }
-  function applyConfigToUI() { const dbg = document.getElementById('tt-cfg-debug'), re = document.getElementById('tt-cfg-real-enabled'), mode = document.getElementById('tt-cfg-strategy-mode'), eps = document.getElementById('tt-cfg-epsilon'), intensity = document.getElementById('tt-cfg-intensity'); if (dbg) dbg.checked = cfg.debugSignals; if (re) re.checked = !!cfg.realTradeEnabled; if (mode) mode.value = cfg.strategyMode; if (eps) eps.value = cfg.epsilon; if (intensity) intensity.value = cfg.minIntensity || 1.2; updateRealUI(); }
+  function loadCfg() { const stored = safeStorage('get', 'tt-cfg'); return Object.assign({ strategyMode: 'hybrid', epsilon: 0.2, minIntensity: 1.2, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true, minADX: 25, minBBWidth: 0.2 }, stored || {}); }
+  function applyConfigToUI() { const dbg = document.getElementById('tt-cfg-debug'), re = document.getElementById('tt-cfg-real-enabled'), mode = document.getElementById('tt-cfg-strategy-mode'), eps = document.getElementById('tt-cfg-epsilon'), intensity = document.getElementById('tt-cfg-intensity'), madx = document.getElementById('tt-cfg-min-adx'), mbbw = document.getElementById('tt-cfg-min-bbw'); if (dbg) dbg.checked = cfg.debugSignals; if (re) re.checked = !!cfg.realTradeEnabled; if (mode) mode.value = cfg.strategyMode; if (eps) eps.value = cfg.epsilon; if (intensity) intensity.value = cfg.minIntensity || 1.2; if (madx) madx.value = cfg.minADX || 25; if (mbbw) mbbw.value = cfg.minBBWidth || 0.2; updateRealUI(); }
   function startWatchdog() { if (watchdogInterval) clearInterval(watchdogInterval); watchdogInterval = setInterval(() => { const now = Date.now(); if (wsState !== 'connected') return; if (lastTickProcessedAt > 0 && now - lastTickProcessedAt > WATCHDOG_TICK_TIMEOUT) { if (ws) ws.close(); scheduleReconnect(); } }, WATCHDOG_INTERVAL); }
   let subObserver = null, lastFlyoutNode = null;
   function setupFlyoutObserver() {
