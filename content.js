@@ -403,9 +403,6 @@
       // Global Trend & Volatility Filters
       if (!isTrending) return null;
 
-      const blockBuyDigits = [0, 1, 5, 8], blockSellDigits = [7, 9];
-      const isBuyBlocked = blockBuyDigits.includes(t0.lastDigit), isSellBlocked = blockSellDigits.includes(t0.lastDigit);
-
       const localSlice = ticks.slice(-3);
       const localHigh = Math.max(...localSlice.map(x => x.price)), localLow = Math.min(...localSlice.map(x => x.price));
       const isBreakout = t0.price >= localHigh || t0.price <= localLow;
@@ -422,9 +419,14 @@
       }
 
       if (res) {
+        // Two-Tick Directional Confirmation
+        const isConfirmed = (res.type === 'BUY' && t0.direction === 1 && tMinus1.direction === 1) ||
+                            (res.type === 'SELL' && t0.direction === -1 && tMinus1.direction === -1);
+
+        if (!isConfirmed) res = null;
         // Trend Alignment using EMA Slope
-        if (res.type === 'BUY' && (isBuyBlocked || emaSlope < -0.01)) res = null;
-        if (res.type === 'SELL' && (isSellBlocked || emaSlope > 0.01)) res = null;
+        else if (res.type === 'BUY' && emaSlope < -0.01) res = null;
+        else if (res.type === 'SELL' && emaSlope > 0.01) res = null;
       }
     }
     else if (mode === 'ignitionSuite') { if (streak < 4) res = checkReversalFlip() || checkMomentumIgnition(); }
