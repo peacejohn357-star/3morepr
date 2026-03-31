@@ -274,16 +274,18 @@
       const minusDM = (downMove > upMove && downMove > 0) ? downMove : 0;
 
       const alphaADX = 1 / 14;
-      smTR = prevTick ? (prevTick.smTR * (1 - alphaADX) + tr) : tr;
-      smPlusDM = prevTick ? (prevTick.smPlusDM * (1 - alphaADX) + plusDM) : plusDM;
-      smMinusDM = prevTick ? (prevTick.smMinusDM * (1 - alphaADX) + minusDM) : minusDM;
+      // Smoothed Averages (Standard EMA approach for consistency)
+      smTR = (prevTick && prevTick.smTR) ? (prevTick.smTR * (1 - alphaADX) + tr * alphaADX) : tr;
+      smPlusDM = (prevTick && prevTick.smPlusDM) ? (prevTick.smPlusDM * (1 - alphaADX) + plusDM * alphaADX) : plusDM;
+      smMinusDM = (prevTick && prevTick.smMinusDM) ? (prevTick.smMinusDM * (1 - alphaADX) + minusDM * alphaADX) : minusDM;
 
       if (smTR > 0) {
         plusDI = 100 * (smPlusDM / smTR);
         minusDI = 100 * (smMinusDM / smTR);
       }
       const dx = (plusDI + minusDI) > 0 ? (100 * Math.abs(plusDI - minusDI) / (plusDI + minusDI)) : 0;
-      adx = prevTick ? (prevTick.adx * (1 - alphaADX) + dx) : dx;
+      // Correct ADX Smoothing: Average of DX
+      adx = (prevTick && prevTick.adx) ? (prevTick.adx * (1 - alphaADX) + dx * alphaADX) : dx;
     }
 
     const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, ema10, smTR, smPlusDM, smMinusDM, plusDI, minusDI, adx: adx || 0 };
