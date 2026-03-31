@@ -524,7 +524,7 @@
         triggerDigit: res.triggerDigit || t0.lastDigit,
         triggerDesc: res.triggerDesc,
         startTickIndex: res.startTickIndex || tickSeq + 1,
-        startTime: Date.now(),
+        signalTime: Date.now(),
         metrics: {
           rsi: t0.rsi,
           adx: t0.adx,
@@ -585,20 +585,20 @@
   function recordSessionTrade(sig) { sessionTradesAll.push(sig); if (sessionTradesAll.length > SESSION_HISTORY_CAP) sessionTradesAll.shift(); }
   function exportCSV() {
     if (!sessionTradesAll.length) return;
-    const head = ['Type', 'Strategy', 'Price', 'Time', 'Result', 'Digit', 'Desc', 'Sig RSI', 'Sig ADX', 'Sig BBW', 'Sig Int', 'Sig Eps', 'Sig SLow', 'Sig SHigh', 'Conf RSI', 'Conf ADX', 'Conf BBW', 'Conf Int', 'Conf Eps', 'Conf SLow', 'Conf SHigh'];
+    const head = ['Type', 'Strategy', 'Price', 'Tick Time', 'Signal Time', 'Confirm Time', 'Result', 'Digit', 'Desc', 'Sig RSI', 'Sig ADX', 'Sig BBW', 'Sig Int', 'Sig Eps', 'Sig SLow', 'Sig SHigh', 'Conf RSI', 'Conf ADX', 'Conf BBW', 'Conf Int', 'Conf Eps', 'Conf SLow', 'Conf SHigh'];
     const rows = [head].concat(sessionTradesAll.map(s => {
       const m = s.metrics || {}, cm = s.confirmMetrics || {};
-      return [s.type, s.strategy, s.price.toFixed(2), s.time, s.result, s.triggerDigit ?? '', s.triggerDesc ?? '', m.rsi??'', m.adx??'', m.bbw??'', m.intensity??'', m.epsilon??'', m.sLow??'', m.sHigh??'', cm.rsi??'', cm.adx??'', cm.bbw??'', cm.intensity??'', cm.epsilon??'', cm.sLow??'', cm.sHigh??''];
+      return [s.type, s.strategy, s.price.toFixed(2), s.time, s.signalTime || '', s.confirmTime || '', s.result, s.triggerDigit ?? '', s.triggerDesc ?? '', m.rsi??'', m.adx??'', m.bbw??'', m.intensity??'', m.epsilon??'', m.sLow??'', m.sHigh??'', cm.rsi??'', cm.adx??'', cm.bbw??'', cm.intensity??'', cm.epsilon??'', cm.sLow??'', cm.sHigh??''];
     }));
     const csv = rows.map(r => r.join(',')).join('\n'); const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = '3tick-signals.csv'; a.click();
   }
   function exportRealCSV() {
     if (!realTrades.length) return;
-    const head = ['Time', 'Side', 'Result', 'PnL', 'Digit', 'Desc', 'Sig RSI', 'Sig ADX', 'Sig BBW', 'Sig Int', 'Sig Eps', 'Sig SLow', 'Sig SHigh', 'Conf RSI', 'Conf ADX', 'Conf BBW', 'Conf Int', 'Conf Eps', 'Conf SLow', 'Conf SHigh'];
+    const head = ['Signal Time', 'Confirm Time', 'Side', 'Result', 'PnL', 'Digit', 'Desc', 'Sig RSI', 'Sig ADX', 'Sig BBW', 'Sig Int', 'Sig Eps', 'Sig SLow', 'Sig SHigh', 'Conf RSI', 'Conf ADX', 'Conf BBW', 'Conf Int', 'Conf Eps', 'Conf SLow', 'Conf SHigh'];
     const rows = [head].concat(realTrades.map(t => {
       const s = t.signalRef || {}, m = s.metrics || {}, cm = t.confirmMetrics || {};
-      return [new Date(t.time).toISOString(), t.side, t.result, t.pnl || '', s.triggerDigit ?? '', s.triggerDesc ?? '', m.rsi??'', m.adx??'', m.bbw??'', m.intensity??'', m.epsilon??'', m.sLow??'', m.sHigh??'', cm.rsi??'', cm.adx??'', cm.bbw??'', cm.intensity??'', cm.epsilon??'', cm.sLow??'', cm.sHigh??''];
+      return [t.time, t.confirmTime || '', t.side, t.result, t.pnl || '', s.triggerDigit ?? '', s.triggerDesc ?? '', m.rsi??'', m.adx??'', m.bbw??'', m.intensity??'', m.epsilon??'', m.sLow??'', m.sHigh??'', cm.rsi??'', cm.adx??'', cm.bbw??'', cm.intensity??'', cm.epsilon??'', cm.sLow??'', cm.sHigh??''];
     }));
     const csv = rows.map(r => r.join(',')).join('\n'); const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = '3tick-real.csv'; a.click();
@@ -677,10 +677,12 @@
       const text = flyout.innerText;
 
       // Purchase confirmation
-      if (text.includes("Contract bought") || text.includes("ID:") || text.includes("Reference ID")) {
-        const sig = signals.find(s => s.result === 'PENDING' && s.isReal && !s.confirmMetrics);
+      if (text.includes("Contract bought") || text.includes("ID:") || text.includes("Reference ID") || text.includes("Reference no") || text.includes("Contract ID")) {
+        // Reverse search for the most recent pending real signal
+        const sig = sessionTradesAll.slice().reverse().find(s => s.result === 'PENDING' && s.isReal && !s.confirmMetrics);
         if (sig) {
-          sig.startTickIndex = tickSeq + 1; sig.startTime = Date.now();
+          sig.startTickIndex = tickSeq + 1;
+          sig.confirmTime = Date.now();
           const t0 = ticks[ticks.length - 1];
           if (t0) {
             sig.confirmMetrics = {
@@ -693,10 +695,10 @@
               sHigh: sHigh
             };
           }
-          const real = realTrades.find(t => t.result === 'PENDING' && !t.startTickIndex);
+          const real = realTrades.slice().reverse().find(t => t.result === 'PENDING' && !t.confirmTime);
           if (real) {
             real.startTickIndex = sig.startTickIndex;
-            real.startTime = sig.startTime;
+            real.confirmTime = sig.confirmTime;
             real.confirmMetrics = sig.confirmMetrics;
           }
         }
@@ -770,7 +772,7 @@
       const btn = document.querySelector(SEL_PURCHASE_BTN); if (!btn || !btn.classList.contains(activeClass)) throw new Error('btn_mismatch');
       simulateExternalClick(btn); lastRealTradeAt = Date.now();
       const signalToMark = signals.find(s => s.result === 'PENDING' && s.isReal);
-      realTrades.push({ time: Date.now(), signal: side, side: buyLabel, result: 'PENDING', signalRef: signalToMark, startTickIndex: null, startTime: null });
+      realTrades.push({ time: Date.now(), signal: side, side: buyLabel, result: 'PENDING', signalRef: signalToMark, startTickIndex: null, confirmTime: null });
       realExecTimer = setTimeout(() => { if (['OPEN_PENDING', 'OPEN'].includes(realExecState)) { realExecState = 'RECOVERY'; realLockReason = 'TIMEOUT'; updateRealUI(); } }, cfg.realTimeoutMs);
     } catch (e) { realLockReason = 'ERR:' + e.message; updateRealUI(); setTimeout(() => { if (realExecState === 'OPEN_PENDING') { realExecState = 'IDLE'; realLockReason = ''; updateRealUI(); } }, 3000); }
   }
