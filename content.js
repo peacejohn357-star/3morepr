@@ -137,10 +137,22 @@
 
   // ── WebSocket & Percentiles ───────────────────────────────────────────────
   function resolveSymbol(symbols) {
-    var candidates = ['stpRNG', 'STPRNG'];
-    for (var i = 0; i < candidates.length; i++) if (symbols.find(s => s.symbol === candidates[i])) return candidates[i];
+    // Priority 1: Exact matches for common Step Index 100 internal symbols
+    var candidates = ['stpRNG', 'STPRNG', 'R_100', '100'];
+    for (var i = 0; i < candidates.length; i++) {
+      const match = symbols.find(s => s.symbol === candidates[i]);
+      if (match) return match.symbol;
+    }
+    // Priority 2: Display name matching "Step Index 100"
     var byName = symbols.find(s => /step\s*index\s*100/i.test(s.display_name));
-    return byName ? byName.symbol : (symbols.find(s => /step/i.test(s.display_name))?.symbol || null);
+    if (byName) return byName.symbol;
+
+    // Priority 3: Any "Step Index" symbol
+    var anyStep = symbols.find(s => /step\s*index/i.test(s.display_name));
+    if (anyStep) return anyStep.symbol;
+
+    // Priority 4: Fallback to any "Step"
+    return symbols.find(s => /step/i.test(s.display_name))?.symbol || null;
   }
 
   function connect() {
@@ -174,37 +186,46 @@
     if (el) el.textContent = state.charAt(0).toUpperCase() + state.slice(1);
   }
 
-  function calculatePercentiles() {
-    if (speedHistory.length < 10) return;
-    const sorted = speedHistory.slice().sort((a, b) => a - b);
-    const p30 = sorted[Math.floor(sorted.length * 0.3)], p70 = sorted[Math.floor(sorted.length * 0.7)];
-    const sum = speedHistory.reduce((a, b) => a + b, 0); speedMean = sum / speedHistory.length;
-    const sqDiff = speedHistory.map(v => Math.pow(v - speedMean, 2)); speedStd = Math.sqrt(sqDiff.reduce((a, b) => a + b, 0) / speedHistory.length);
-    sHigh = Math.max(p70, speedMean + speedStd); sLow = Math.min(p30, Math.max(0, speedMean - speedStd));
+  function updateStatsUI() {
+    const statsVal = `${sLow.toFixed(4)} / ${sHigh.toFixed(4)}`;
+    const distVal = `${speedMean.toFixed(4)} / ${speedStd.toFixed(4)}`;
+    const t0 = ticks[ticks.length - 1];
+    const currentADX = t0?.adx || 0;
+    const adxVal = `${Math.round(currentADX)} / ${bbWidth.toFixed(2)}`;
 
-    // Throttle UI updates for stats
-    if (tickSeq % 5 === 0) {
-      const statsVal = `${sLow.toFixed(4)} / ${sHigh.toFixed(4)}`;
-      const distVal = `${speedMean.toFixed(4)} / ${speedStd.toFixed(4)}`;
-      const t0 = ticks[ticks.length-1];
-      const adxVal = `${Math.round(t0?.adx || 0)} / ${bbWidth.toFixed(2)}`;
-
-      if (lastUI.stats !== statsVal) {
-        const el = document.getElementById('tt-speed-stats');
-        if (el) el.textContent = statsVal;
-        lastUI.stats = statsVal;
-      }
-      if (lastUI.dist !== distVal) {
-        const el = document.getElementById('tt-speed-dist');
-        if (el) el.textContent = distVal;
-        lastUI.dist = distVal;
-      }
-      if (lastUI.adx !== adxVal) {
-        const el = document.getElementById('tt-adx-stats');
-        if (el) el.textContent = adxVal;
-        lastUI.adx = adxVal;
-      }
+    if (lastUI.stats !== statsVal) {
+      const el = document.getElementById('tt-speed-stats');
+      if (el) el.textContent = statsVal;
+      lastUI.stats = statsVal;
     }
+    if (lastUI.dist !== distVal) {
+      const el = document.getElementById('tt-speed-dist');
+      if (el) el.textContent = distVal;
+      lastUI.dist = distVal;
+    }
+    if (lastUI.adx !== adxVal) {
+      const el = document.getElementById('tt-adx-stats');
+      if (el) {
+        el.textContent = adxVal;
+        // Visual cue: green if ADX > min, red if BB width is too small
+        const minADX = cfg.minADX || 25;
+        const minBBW = cfg.minBBWidth || 0.2;
+        el.style.color = (currentADX >= minADX && bbWidth >= minBBW) ? '#3ecf60' : '#7a8499';
+      }
+      lastUI.adx = adxVal;
+    }
+  }
+
+  function calculatePercentiles() {
+    if (speedHistory.length >= 10) {
+      const sorted = speedHistory.slice().sort((a, b) => a - b);
+      const p30 = sorted[Math.floor(sorted.length * 0.3)], p70 = sorted[Math.floor(sorted.length * 0.7)];
+      const sum = speedHistory.reduce((a, b) => a + b, 0); speedMean = sum / speedHistory.length;
+      const sqDiff = speedHistory.map(v => Math.pow(v - speedMean, 2)); speedStd = Math.sqrt(sqDiff.reduce((a, b) => a + b, 0) / speedHistory.length);
+      sHigh = Math.max(p70, speedMean + speedStd); sLow = Math.min(p30, Math.max(0, speedMean - speedStd));
+    }
+
+    if (tickSeq % 5 === 0) updateStatsUI();
   }
 
   function handleTick(tick) {
@@ -224,7 +245,9 @@
     const k = 2 / (10 + 1);
     const ema10 = prevTick ? (price * k + (prevTick.ema10 || price) * (1 - k)) : price;
 
-    // ADX (14) Calculation using a 5-tick micro-window to create H/L/C bars
+    if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
+
+    // ADX (14) Calculation using a 5-tick micro-window
     let adx = 0, plusDI = 0, minusDI = 0;
     let smTR = prevTick ? prevTick.smTR : 0;
     let smPlusDM = prevTick ? prevTick.smPlusDM : 0;
@@ -232,15 +255,15 @@
 
     if (ticks.length >= 6) {
       const windowSize = 5;
-      const currWindow = [state, ...ticks.slice(-windowSize + 1)];
-      const prevWindow = ticks.slice(-windowSize);
+      const currWindowPrices = [price, ...ticks.slice(-windowSize + 1).map(t => t.price)];
+      const prevWindowPrices = ticks.slice(-windowSize).map(t => t.price);
 
-      const currH = Math.max(...currWindow.map(t => t.price));
-      const currL = Math.min(...currWindow.map(t => t.price));
+      const currH = Math.max(...currWindowPrices);
+      const currL = Math.min(...currWindowPrices);
       const currC = price;
 
-      const prevH = Math.max(...prevWindow.map(t => t.price));
-      const prevL = Math.min(...prevWindow.map(t => t.price));
+      const prevH = Math.max(...prevWindowPrices);
+      const prevL = Math.min(...prevWindowPrices);
       const prevC = prevTick.price;
 
       const tr = Math.max(currH - currL, Math.abs(currH - prevC), Math.abs(currL - prevC));
@@ -263,7 +286,6 @@
       adx = prevTick ? (prevTick.adx * (1 - alphaADX) + dx) : dx;
     }
 
-    if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
     const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, ema10, smTR, smPlusDM, smMinusDM, plusDI, minusDI, adx: adx || 0 };
     ticks.push(state); if (ticks.length > TICK_BUF) ticks.shift();
 
