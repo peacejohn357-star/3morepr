@@ -147,8 +147,8 @@
     document.getElementById('tt-cfg-rsi-sell-min').addEventListener('change', function () { cfg.rsiSellMin = parseFloat(this.value) || 30; saveCfg(); });
     document.getElementById('tt-cfg-rsi-sell-max').addEventListener('change', function () { cfg.rsiSellMax = parseFloat(this.value) || 40; saveCfg(); });
     document.getElementById('tt-cfg-min-bbw').addEventListener('change', function () { cfg.minBBWidth = parseFloat(this.value) || 0.2; saveCfg(); });
-    document.getElementById('tt-cfg-intensity').addEventListener('change', function () { cfg.minIntensity = parseFloat(this.value) || 1.2; saveCfg(); });
-    document.getElementById('tt-cfg-epsilon').addEventListener('change', function () { cfg.epsilon = parseFloat(this.value) || 0.2; saveCfg(); });
+    document.getElementById('tt-cfg-intensity').addEventListener('change', function () { const val = parseFloat(this.value); cfg.minIntensity = isNaN(val) ? 1.2 : val; saveCfg(); });
+    document.getElementById('tt-cfg-epsilon').addEventListener('change', function () { const val = parseFloat(this.value); cfg.epsilon = isNaN(val) ? 0.2 : val; saveCfg(); });
     document.getElementById('tt-cfg-debug').addEventListener('change', function () { cfg.debugSignals = this.checked; saveCfg(); });
     document.getElementById('tt-cfg-real-enabled').addEventListener('change', function () { cfg.realTradeEnabled = this.checked; saveCfg(); });
     document.getElementById('tt-real-export').addEventListener('click', exportRealCSV);
@@ -296,7 +296,8 @@
         if (d > 0) up += d; else down += Math.abs(d);
       }
       const avgUp = up / rsiP, avgDown = down / rsiP;
-      rsi = avgDown === 0 ? 100 : 100 - (100 / (1 + avgUp / avgDown));
+      if (avgUp === 0 && avgDown === 0) rsi = 50;
+      else rsi = avgDown === 0 ? 100 : 100 - (100 / (1 + avgUp / avgDown));
     }
 
     if (ticks.length >= 10) {
@@ -307,7 +308,7 @@
     }
 
     if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
-    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, trendEma, adx, rsi };
+    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, trendEma, ema10: trendEma, adx, rsi };
     ticks.push(state); if (ticks.length > TICK_BUF) ticks.shift();
     speedHistory.push(absSpeed); if (speedHistory.length > SPEED_BUF) speedHistory.shift();
     calculatePercentiles(); lastTickProcessedAt = Date.now();
@@ -452,54 +453,33 @@
 
     // Evaluation Logic
     if (mode === 'unleashed') {
-      // Global Trend & Volatility Filters
-      if (!isTrending) return null;
+      const minIntensity = (cfg.minIntensity !== undefined) ? cfg.minIntensity : 0;
+      const epsilon = (cfg.epsilon !== undefined) ? cfg.epsilon : 0;
 
-      const localSlice = ticks.slice(-3);
-      const localHigh = Math.max(...localSlice.map(x => x.price)), localLow = Math.min(...localSlice.map(x => x.price));
-      const isBreakout = t0.price >= localHigh || t0.price <= localLow;
-      const intensityBypass = t0.intensity > 1.5;
+      // BUY Conditions
+      const buyOk = (
+        t0.direction === 1 && tMinus1.direction === 1 &&    // Last 2 ticks are UP
+        t0.price > t0.trendEma &&                           // Price > Trend EMA
+        currentADX >= adxMin && currentADX <= adxMax &&     // ADX is 25-60 (using dashboard range)
+        currentRSI >= (cfg.rsiBuyMin || 50) && currentRSI <= (cfg.rsiBuyMax || 75) && // RSI Buy Range
+        bbWidth > (cfg.minBBWidth || 0.2) &&                // BB Width > 0.2
+        t0.intensity > minIntensity &&                      // Intensity > minIntensity
+        t0.deltaChange > epsilon                            // DeltaChange > epsilon
+      );
 
-      // Use EMA Slope for crossing and trend alignment
-      const earlyCrossing = (tMinus1.price < tMinus1.trendEma && t0.price >= t0.trendEma && emaSlope > 0.005) ? 'BUY' :
-                            (tMinus1.price > tMinus1.trendEma && t0.price <= t0.trendEma && emaSlope < -0.005) ? 'SELL' : null;
+      // SELL Conditions
+      const sellOk = (
+        t0.direction === -1 && tMinus1.direction === -1 &&  // Last 2 ticks are DOWN
+        t0.price < t0.trendEma &&                           // Price < Trend EMA
+        currentADX >= adxMin && currentADX <= adxMax &&     // ADX is 25-60
+        currentRSI >= (cfg.rsiSellMin || 20) && currentRSI <= (cfg.rsiSellMax || 40) && // RSI Sell Range
+        bbWidth > (cfg.minBBWidth || 0.2) &&                // BB Width > 0.2
+        t0.intensity > minIntensity &&                      // Intensity > minIntensity
+        t0.deltaChange < -epsilon                           // DeltaChange < -epsilon
+      );
 
-      if (earlyCrossing) {
-        res = { type: earlyCrossing, conf: 92, triggerDesc: 'EARLY-CROSS' };
-      } else if (isBreakout || intensityBypass) {
-        res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
-      }
-
-      if (res) {
-        // Two-Tick Directional Confirmation
-        const isConfirmed = (res.type === 'BUY' && t0.direction === 1 && tMinus1.direction === 1) ||
-                            (res.type === 'SELL' && t0.direction === -1 && tMinus1.direction === -1);
-
-        if (!isConfirmed) res = null;
-
-        // RSI Range Filter
-        if (res) {
-          if (res.type === 'BUY') {
-            const rmin = cfg.rsiBuyMin || 60, rmax = cfg.rsiBuyMax || 75;
-            if (currentRSI < rmin || currentRSI > rmax) res = null;
-          } else if (res.type === 'SELL') {
-            const rmin = cfg.rsiSellMin || 30, rmax = cfg.rsiSellMax || 40;
-            if (currentRSI < rmin || currentRSI > rmax) res = null;
-          }
-        }
-
-        // Trend EMA Alignment (Buy above EMA, Sell below EMA)
-        if (res) {
-          if (res.type === 'BUY' && t0.price <= t0.trendEma) res = null;
-          else if (res.type === 'SELL' && t0.price >= t0.trendEma) res = null;
-        }
-
-        // Trend Alignment using EMA Slope
-        if (res) {
-          if (res.type === 'BUY' && emaSlope < -0.01) res = null;
-          else if (res.type === 'SELL' && emaSlope > 0.01) res = null;
-        }
-      }
+      if (buyOk) res = { type: 'BUY', conf: 100, triggerDesc: 'DASHBOARD-CONFLUENCE' };
+      else if (sellOk) res = { type: 'SELL', conf: 100, triggerDesc: 'DASHBOARD-CONFLUENCE' };
     }
     else if (mode === 'ignitionSuite') { if (streak < 4) res = checkReversalFlip() || checkMomentumIgnition(); }
     else if (mode === 'trendIgnition') res = checkTrendIgnition();
@@ -629,7 +609,7 @@
     if (re) re.checked = !!cfg.realTradeEnabled;
     if (mode) mode.value = cfg.strategyMode;
     if (eps) eps.value = cfg.epsilon;
-    if (intensity) intensity.value = cfg.minIntensity || 1.2;
+    if (intensity) intensity.value = (cfg.minIntensity !== undefined) ? cfg.minIntensity : 1.2;
     if (mbbw) mbbw.value = cfg.minBBWidth || 0.2;
     if (adxMin) adxMin.value = cfg.adxMin || 25;
     if (adxMax) adxMax.value = cfg.adxMax || 60;
