@@ -27,7 +27,7 @@
   let cfg = {
     tickSize: 0.1,
     strategyMode: 'hybrid',
-    epsilon: 0.2,
+    epsilon: 0.1,
     realTradeEnabled: false,
     realTimeoutMs: 40000,
     realCooldownMs: 5000,
@@ -38,12 +38,13 @@
     adxMax: 60,
     adxPeriod: 14,
     rsiPeriod: 14,
-    rsiBuyMin: 60,
+    rsiBuyMin: 50,
     rsiBuyMax: 75,
-    rsiSellMin: 30,
+    rsiSellMin: 20,
     rsiSellMax: 40,
-    trendEmaPeriod: 15,
+    trendEmaPeriod: 10,
     minBBWidth: 0.2,
+    minIntensity: 1.2,
   };
 
   // ── State ─────────────────────────────────────────────────────────────────
@@ -367,9 +368,9 @@
     // Filter indicators
     const currentADX = t0.adx || 0;
     const currentRSI = t0.rsi || 50;
-    const adxMin = cfg.adxMin || 25;
-    const adxMax = cfg.adxMax || 60;
-    const minBBW = cfg.minBBWidth || 0.2;
+    const adxMin = (cfg.adxMin !== undefined) ? cfg.adxMin : 25;
+    const adxMax = (cfg.adxMax !== undefined) ? cfg.adxMax : 60;
+    const minBBW = (cfg.minBBWidth !== undefined) ? cfg.minBBWidth : 0.2;
     const isTrending = (currentADX >= adxMin && currentADX <= adxMax) && bbWidth >= minBBW;
     const emaSlope = t0.trendEma - tMinus1.trendEma;
 
@@ -458,22 +459,22 @@
 
       // BUY Conditions
       const buyOk = (
-        t0.direction === 1 && tMinus1.direction === 1 &&    // Last 2 ticks are UP
+        t0.direction === 1 &&                               // Price is UP
         t0.price > t0.trendEma &&                           // Price > Trend EMA
         currentADX >= adxMin && currentADX <= adxMax &&     // ADX is 25-60 (using dashboard range)
-        currentRSI >= (cfg.rsiBuyMin || 50) && currentRSI <= (cfg.rsiBuyMax || 75) && // RSI Buy Range
-        bbWidth > (cfg.minBBWidth || 0.2) &&                // BB Width > 0.2
+        currentRSI >= ((cfg.rsiBuyMin !== undefined) ? cfg.rsiBuyMin : 50) && currentRSI <= ((cfg.rsiBuyMax !== undefined) ? cfg.rsiBuyMax : 75) && // RSI Buy Range
+        bbWidth > ((cfg.minBBWidth !== undefined) ? cfg.minBBWidth : 0.2) &&                // BB Width > 0.2
         t0.intensity > minIntensity &&                      // Intensity > minIntensity
         t0.deltaChange > epsilon                            // DeltaChange > epsilon
       );
 
       // SELL Conditions
       const sellOk = (
-        t0.direction === -1 && tMinus1.direction === -1 &&  // Last 2 ticks are DOWN
+        t0.direction === -1 &&                              // Price is DOWN
         t0.price < t0.trendEma &&                           // Price < Trend EMA
         currentADX >= adxMin && currentADX <= adxMax &&     // ADX is 25-60
-        currentRSI >= (cfg.rsiSellMin || 20) && currentRSI <= (cfg.rsiSellMax || 40) && // RSI Sell Range
-        bbWidth > (cfg.minBBWidth || 0.2) &&                // BB Width > 0.2
+        currentRSI >= ((cfg.rsiSellMin !== undefined) ? cfg.rsiSellMin : 20) && currentRSI <= ((cfg.rsiSellMax !== undefined) ? cfg.rsiSellMax : 40) && // RSI Sell Range
+        bbWidth > ((cfg.minBBWidth !== undefined) ? cfg.minBBWidth : 0.2) &&                // BB Width > 0.2
         t0.intensity > minIntensity &&                      // Intensity > minIntensity
         t0.deltaChange < -epsilon                           // DeltaChange < -epsilon
       );
@@ -506,7 +507,7 @@
         if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks || Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs || realExecState !== 'IDLE') return null;
         lastSignalTickIndex = currentTickIndex;
         let conf = res.conf;
-      if (!res.triggerDesc?.includes('POWER') && ((res.type === 'BUY' && !buyDigitBias) || (res.type === 'SELL' && !sellDigitBias))) conf -= 10;
+      if (mode !== 'unleashed' && !res.triggerDesc?.includes('POWER') && ((res.type === 'BUY' && !buyDigitBias) || (res.type === 'SELL' && !sellDigitBias))) conf -= 10;
 
       const sig = {
         type: res.type,
@@ -587,7 +588,7 @@
   }
   function safeStorage(op, key, val) { try { if (op === 'get') return JSON.parse(localStorage.getItem(key)); if (op === 'set') localStorage.setItem(key, JSON.stringify(val)); } catch (_) { } return null; }
   function saveCfg() { safeStorage('set', 'tt-cfg', cfg); }
-  function loadCfg() { const stored = safeStorage('get', 'tt-cfg'); return Object.assign({ strategyMode: 'hybrid', epsilon: 0.2, minIntensity: 1.2, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true, adxMin: 25, adxMax: 60, adxPeriod: 14, rsiPeriod: 14, rsiBuyMin: 60, rsiBuyMax: 75, rsiSellMin: 30, rsiSellMax: 40, trendEmaPeriod: 15, minBBWidth: 0.2 }, stored || {}); }
+  function loadCfg() { const stored = safeStorage('get', 'tt-cfg'); return Object.assign({ strategyMode: 'hybrid', epsilon: 0.1, minIntensity: 1.2, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true, adxMin: 25, adxMax: 60, adxPeriod: 14, rsiPeriod: 14, rsiBuyMin: 50, rsiBuyMax: 75, rsiSellMin: 20, rsiSellMax: 40, trendEmaPeriod: 10, minBBWidth: 0.2 }, stored || {}); }
   function applyConfigToUI() {
     const dbg = document.getElementById('tt-cfg-debug'),
           re = document.getElementById('tt-cfg-real-enabled'),
