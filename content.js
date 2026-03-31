@@ -54,7 +54,7 @@
   let signals = [], sessionTradesAll = [];
   let tickSeq = 0, lastSignalTickIndex = -999, upStreak = 0, downStreak = 0;
   let lastTickProcessedAt = 0, lastSignalEvalAt = 0, watchdogInterval = null, evalErrorCount = 0;
-  let realExecState = 'IDLE', realTrades = [], realOpenCount = 0, realWins = 0, realLosses = 0, realPnl = 0, realLockReason = '', lastRealTradeAt = 0, lastTradeClosedAt = 0, lastTradeClosedTick = -999, realExecTimer = null, lastSeenPnL = 0;
+  let realExecState = 'IDLE', realTrades = [], realOpenCount = 0, realWins = 0, realLosses = 0, realPnl = 0, realLockReason = '', lastRealTradeAt = 0, lastTradeClosedAt = 0, lastTradeClosedTick = -999, realExecTimer = null, lastSeenPnL = 0, lastSeenResult = null;
   let flyoutObserver = null, ws = null, wsState = 'disconnected', reconnectTimer = null, resolvedSymbol = null, manualClose = false, reconnectDelay = RECONNECT_BASE, failCount = 0, usingFallback = false;
 
   // UI Cache to prevent redundant DOM updates
@@ -504,7 +504,10 @@
     if (res) {
       if (res) {
         const currentTickIndex = tickSeq;
-        if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks || Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs || realExecState !== 'IDLE') return null;
+        if (mode !== 'unleashed') {
+          if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks || Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs) return null;
+        }
+        if (realExecState !== 'IDLE') return null;
         lastSignalTickIndex = currentTickIndex;
         let conf = res.conf;
       if (mode !== 'unleashed' && !res.triggerDesc?.includes('POWER') && ((res.type === 'BUY' && !buyDigitBias) || (res.type === 'SELL' && !sellDigitBias))) conf -= 10;
@@ -655,63 +658,37 @@
       if (text.includes("Contract bought") || text.includes("ID:")) {
         const sig = signals.find(s => s.result === 'PENDING' && s.isReal && !s.startTickIndex);
         if (sig) {
-          // Corrected: The contract starts on the NEXT tick, not the current one
           sig.startTickIndex = tickSeq + 1;
           sig.startTime = Date.now();
-          console.log(`[System] Contract Confirmed. Start Tick anchored at: ${sig.startTickIndex}`);
-
           const real = realTrades.find(t => t.result === 'PENDING' && !t.startTickIndex);
-          if (real) {
-            real.startTickIndex = sig.startTickIndex;
-            real.startTime = sig.startTime;
-          }
-        }
-      }
-      const hasProfitClass = !!flyout.querySelector('.dc-contract-card--profit, .dc-contract-card__profit-loss--is-profit, .dc-contract-card-item__body--profit');
-      const hasLossClass = !!flyout.querySelector('.dc-contract-card--loss, .dc-contract-card__profit-loss--is-loss, .dc-contract-card-item__body--loss');
-
-      // Track real-time PnL from the flyout while trade is open
-      // Use specific selectors if possible, otherwise regex on innerText
-      const pnlEl = flyout.querySelector('.dc-contract-card__profit-loss-label, .dc-status-colored-text, .dc-contract-card-item__body--profit span[data-testid="dt_span"], .dc-contract-card-item__body--loss span[data-testid="dt_span"]');
-      const profitValEl = flyout.querySelector('.dc-contract-card-item__body--profit span[data-testid="dt_span"]');
-      const lossValEl = flyout.querySelector('.dc-contract-card-item__body--loss span[data-testid="dt_span"]');
-
-      if (profitValEl || lossValEl) {
-        const val = parseFloat((profitValEl || lossValEl).innerText.replace(/[^-0-9.]/g, ''));
-        if (!isNaN(val)) lastSeenPnL = val;
-      } else if (pnlEl) {
-        const val = parseFloat(pnlEl.innerText.replace(/[^-0-9.]/g, ''));
-        if (!isNaN(val)) lastSeenPnL = val;
-      } else {
-        const pnlRegex = /(?:Total\s+profit\/loss|Profit\/Loss)[:\s]*([+-]?\d+\.?\d*)/i;
-        const pnlMatch = text.match(pnlRegex);
-        if (pnlMatch) {
-          lastSeenPnL = parseFloat(pnlMatch[1]);
+          if (real) { real.startTickIndex = sig.startTickIndex; real.startTime = sig.startTime; }
         }
       }
 
-      let count = text.includes('no open positions') ? 0 : (text.match(/(\d+)\s+open\s+position/i) ? parseInt(text.match(/(\d+)\s+open\s+position/i)[1], 10) : realOpenCount);
-      let closedResult = null;
+      // 1. Detect Result via Stable Class Selectors (Most Reliable)
+      const profitCard = flyout.querySelector('.dc-contract-card--profit, .dc-contract-card--green');
+      const lossCard   = flyout.querySelector('.dc-contract-card--loss, .dc-contract-card--red');
 
-      // EXPLICIT WIN/LOSS DETECTION (Strictly negative sign = LOSS)
-      let isDefiniteLoss = false;
-      const pnlElFinal = flyout.querySelector('.dc-contract-card__profit-loss-label, .dc-status-colored-text, .dc-contract-card-item__body--profit span[data-testid="dt_span"], .dc-contract-card-item__body--loss span[data-testid="dt_span"]');
+      if (profitCard) lastSeenResult = 'WIN';
+      else if (lossCard) lastSeenResult = 'LOSS';
 
-      if (pnlElFinal) {
-        const pnlText = pnlElFinal.innerText;
-        if (pnlText.includes('-')) {
-          isDefiniteLoss = true;
-        }
+      // 2. Extract PnL via data-testid (Most Reliable)
+      const pnlSpan = flyout.querySelector('[data-testid="dt_span"]');
+      if (pnlSpan) {
+        const val = parseFloat(pnlSpan.innerText.replace(/[^-0-9.]/g, ''));
+        if (!isNaN(val)) lastSeenPnL = val;
       }
 
       // Detection of terminal state
       const isClosed = text.includes('Closed') || /Contract\s+value:\s*0\.00/i.test(text);
+      const noOpen = text.includes('no open positions');
 
-      if (isClosed || (text.includes('no open positions') && realExecState === 'OPEN')) {
-        closedResult = { pnl: lastSeenPnL, result: isDefiniteLoss ? 'LOSS' : 'WIN' };
+      let closedResult = null;
+      if (isClosed || (noOpen && (realExecState === 'OPEN' || realExecState === 'RECOVERY'))) {
+        closedResult = { pnl: lastSeenPnL, result: lastSeenResult || (lastSeenPnL > 0 ? 'WIN' : 'LOSS') };
       }
 
-      const flyoutCount = text.includes('no open positions') ? 0 : (text.match(/(\d+)\s+open\s+position/i) ? parseInt(text.match(/(\d+)\s+open\s+position/i)[1], 10) : realOpenCount);
+      const flyoutCount = noOpen ? 0 : (text.match(/(\d+)\s+open\s+position/i) ? parseInt(text.match(/(\d+)\s+open\s+position/i)[1], 10) : realOpenCount);
       if (flyoutCount !== realOpenCount || closedResult) {
         realOpenCount = flyoutCount;
         updateRealExecStateFromDOM(flyoutCount, closedResult);
@@ -723,12 +700,14 @@
       realExecState = 'IDLE';
       realLockReason = '';
       lastSeenPnL = 0;
+      lastSeenResult = null;
     } else if (count === 0 && (realExecState === 'OPEN' || realExecState === 'RECOVERY')) {
       // Final fallback if flyout disappears and we didn't catch a closed result
-      finalizeRealTrade({ pnl: lastSeenPnL, result: lastSeenPnL > 0 ? 'WIN' : 'LOSS' });
+      finalizeRealTrade({ pnl: lastSeenPnL, result: lastSeenResult || (lastSeenPnL > 0 ? 'WIN' : 'LOSS') });
       realExecState = 'IDLE';
       realLockReason = '';
       lastSeenPnL = 0;
+      lastSeenResult = null;
     }
     if (count > 0 && ['IDLE', 'OPEN_PENDING'].includes(realExecState)) {
       realExecState = 'OPEN';
