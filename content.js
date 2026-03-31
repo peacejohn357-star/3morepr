@@ -253,17 +253,19 @@
     let smPlusDM = prevTick ? prevTick.smPlusDM : 0;
     let smMinusDM = prevTick ? prevTick.smMinusDM : 0;
 
-    if (ticks.length >= 6) {
+    if (ticks.length >= 11) {
       const windowSize = 5;
-      const currWindowPrices = [price, ...ticks.slice(-windowSize + 1).map(t => t.price)];
-      const prevWindowPrices = ticks.slice(-windowSize).map(t => t.price);
+      // Current 5-tick window ending at T0
+      const currWindow = [price, ...ticks.slice(-(windowSize - 1)).map(t => t.price)];
+      // Previous 5-tick window ending at T-1
+      const prevWindow = ticks.slice(-windowSize, -1).map(t => t.price);
 
-      const currH = Math.max(...currWindowPrices);
-      const currL = Math.min(...currWindowPrices);
+      const currH = Math.max(...currWindow);
+      const currL = Math.min(...currWindow);
       const currC = price;
 
-      const prevH = Math.max(...prevWindowPrices);
-      const prevL = Math.min(...prevWindowPrices);
+      const prevH = Math.max(...prevWindow);
+      const prevL = Math.min(...prevWindow);
       const prevC = prevTick.price;
 
       const tr = Math.max(currH - currL, Math.abs(currH - prevC), Math.abs(currL - prevC));
@@ -300,6 +302,9 @@
       const stdDev = Math.sqrt(sumSq / 10);
       state.bb = { middle, upper: middle + (2 * stdDev), lower: middle - (2 * stdDev) };
       bbWidth = state.bb.upper - state.bb.lower;
+
+      // EMA Slope
+      state.bb.slope = (prevTick && prevTick.bb) ? (state.bb.middle - prevTick.bb.middle) : 0;
     }
 
     speedHistory.push(absSpeed); if (speedHistory.length > SPEED_BUF) speedHistory.shift();
@@ -453,12 +458,17 @@
 
         if (res) {
           const digit = t0.lastDigit;
+          const isHighIntensityCross = t0.intensity > 1.5 && t0.bb && tMinus1.bb && (
+            (res.type === 'BUY' && tMinus1.price < tMinus1.bb.middle && t0.price >= t0.bb.middle) ||
+            (res.type === 'SELL' && tMinus1.price > tMinus1.bb.middle && t0.price <= t0.bb.middle)
+          );
+
           if (res.type === 'BUY') {
-            const isBreakout = t0.price >= localHigh;
+            const isBreakout = t0.price >= localHigh || isHighIntensityCross;
             const isBlockedDigit = [0, 1, 5, 8].includes(digit);
             if (!isBreakout || isBlockedDigit) res = null;
           } else if (res.type === 'SELL') {
-            const isBreakout = t0.price <= localLow;
+            const isBreakout = t0.price <= localLow || isHighIntensityCross;
             const isBlockedDigit = [7, 9].includes(digit); // Removed Digit 2 from SELL block list
             if (!isBreakout || isBlockedDigit) res = null;
           }
@@ -483,13 +493,24 @@
     else if (mode === 'reversal') res = checkReversal() || checkReversalFlip();
 
     if (res) {
-      // Bollinger Band Global Filter
-      if (t0.bb) {
-        if (res.type === 'BUY' && t0.price <= t0.bb.middle) res = null;
-        else if (res.type === 'SELL' && t0.price >= t0.bb.middle) res = null;
-      }
+      // Refined Global Bollinger Filter (Early Entry logic)
+      if (t0.bb && tMinus1.bb) {
+        const isCrossingUp = (tMinus1.price < tMinus1.bb.middle && t0.price >= t0.bb.middle);
+        const isCrossingDown = (tMinus1.price > tMinus1.bb.middle && t0.price <= t0.bb.middle);
+        const isUpSlope = t0.bb.slope > 0;
+        const isDownSlope = t0.bb.slope < 0;
 
-      if (res) {
+        if (res.type === 'BUY') {
+          const isValidBuy = (t0.price >= t0.bb.middle) || (isCrossingUp && isUpSlope);
+          if (!isValidBuy) res = null;
+        } else if (res.type === 'SELL') {
+          const isValidSell = (t0.price <= t0.bb.middle) || (isCrossingDown && isDownSlope);
+          if (!isValidSell) res = null;
+        }
+      }
+    }
+
+    if (res) {
         const currentTickIndex = tickSeq;
         if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks || Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs || realExecState !== 'IDLE') return null;
         lastSignalTickIndex = currentTickIndex;
