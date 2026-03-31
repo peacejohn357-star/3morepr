@@ -316,7 +316,7 @@
       return null;
     };
     const checkMomentumIgnition = () => {
-      const isIgnition = Math.abs(t0.acceleration) > 0.0015 && Math.abs(t0.deltaSteps) === 1;
+      const isIgnition = Math.abs(t0.acceleration) > 0.0015 && Math.abs(t0.deltaSteps) >= 1;
       if (isIgnition && streak <= 2) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 90, triggerDesc: 'MOMENTUM-IGN', triggerDigit: t0.lastDigit, startTickIndex: tickSeq + 1 };
       return null;
     };
@@ -369,12 +369,12 @@
         if (res) {
           const digit = t0.lastDigit;
           if (res.type === 'BUY') {
-            const isBreakout = t0.price > localHigh;
+            const isBreakout = t0.price >= localHigh;
             const isBlockedDigit = [0, 1, 5, 8].includes(digit);
             if (!isBreakout || isBlockedDigit) res = null;
           } else if (res.type === 'SELL') {
-            const isBreakout = t0.price < localLow;
-            const isBlockedDigit = [2, 7, 9].includes(digit);
+            const isBreakout = t0.price <= localLow;
+            const isBlockedDigit = [7, 9].includes(digit); // Removed Digit 2 from SELL block list
             if (!isBreakout || isBlockedDigit) res = null;
           }
         }
