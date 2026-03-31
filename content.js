@@ -137,22 +137,10 @@
 
   // ── WebSocket & Percentiles ───────────────────────────────────────────────
   function resolveSymbol(symbols) {
-    // Priority 1: Exact matches for common Step Index 100 internal symbols
-    var candidates = ['stpRNG', 'STPRNG', 'R_100', '100'];
-    for (var i = 0; i < candidates.length; i++) {
-      const match = symbols.find(s => s.symbol === candidates[i]);
-      if (match) return match.symbol;
-    }
-    // Priority 2: Display name matching "Step Index 100"
+    var candidates = ['stpRNG', 'STPRNG'];
+    for (var i = 0; i < candidates.length; i++) if (symbols.find(s => s.symbol === candidates[i])) return candidates[i];
     var byName = symbols.find(s => /step\s*index\s*100/i.test(s.display_name));
-    if (byName) return byName.symbol;
-
-    // Priority 3: Any "Step Index" symbol
-    var anyStep = symbols.find(s => /step\s*index/i.test(s.display_name));
-    if (anyStep) return anyStep.symbol;
-
-    // Priority 4: Fallback to any "Step"
-    return symbols.find(s => /step/i.test(s.display_name))?.symbol || null;
+    return byName ? byName.symbol : (symbols.find(s => /step/i.test(s.display_name))?.symbol || null);
   }
 
   function connect() {
@@ -191,7 +179,7 @@
     const distVal = `${speedMean.toFixed(4)} / ${speedStd.toFixed(4)}`;
     const t0 = ticks[ticks.length - 1];
     const currentADX = t0?.adx || 0;
-    const adxVal = `${Math.round(currentADX)} / ${bbWidth.toFixed(2)}`;
+    const adxVal = `${currentADX.toFixed(2)} / ${bbWidth.toFixed(2)}`;
 
     if (lastUI.stats !== statsVal) {
       const el = document.getElementById('tt-speed-stats');
@@ -207,7 +195,6 @@
       const el = document.getElementById('tt-adx-stats');
       if (el) {
         el.textContent = adxVal;
-        // Visual cue: green if ADX > min, red if BB width is too small
         const minADX = cfg.minADX || 25;
         const minBBW = cfg.minBBWidth || 0.2;
         el.style.color = (currentADX >= minADX && bbWidth >= minBBW) ? '#3ecf60' : '#7a8499';
@@ -245,68 +232,33 @@
     const k = 2 / (10 + 1);
     const ema10 = prevTick ? (price * k + (prevTick.ema10 || price) * (1 - k)) : price;
 
-    if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
-
-    // ADX (14) Calculation using a 5-tick micro-window
-    let adx = 0, plusDI = 0, minusDI = 0;
-    let smTR = prevTick ? prevTick.smTR : 0;
-    let smPlusDM = prevTick ? prevTick.smPlusDM : 0;
-    let smMinusDM = prevTick ? prevTick.smMinusDM : 0;
-
-    if (ticks.length >= 11) {
-      const windowSize = 5;
-      // Current 5-tick window ending at T0
-      const currWindow = [price, ...ticks.slice(-(windowSize - 1)).map(t => t.price)];
-      // Previous 5-tick window ending at T-1
-      const prevWindow = ticks.slice(-windowSize, -1).map(t => t.price);
-
-      const currH = Math.max(...currWindow);
-      const currL = Math.min(...currWindow);
-      const currC = price;
-
-      const prevH = Math.max(...prevWindow);
-      const prevL = Math.min(...prevWindow);
-      const prevC = prevTick.price;
-
-      const tr = Math.max(currH - currL, Math.abs(currH - prevC), Math.abs(currL - prevC));
-      const upMove = currH - prevH;
-      const downMove = prevL - currL;
-
-      const plusDM = (upMove > downMove && upMove > 0) ? upMove : 0;
-      const minusDM = (downMove > upMove && downMove > 0) ? downMove : 0;
-
-      const alphaADX = 1 / 14;
-      // Smoothed Averages (Standard EMA approach for consistency)
-      smTR = (prevTick && prevTick.smTR) ? (prevTick.smTR * (1 - alphaADX) + tr * alphaADX) : tr;
-      smPlusDM = (prevTick && prevTick.smPlusDM) ? (prevTick.smPlusDM * (1 - alphaADX) + plusDM * alphaADX) : plusDM;
-      smMinusDM = (prevTick && prevTick.smMinusDM) ? (prevTick.smMinusDM * (1 - alphaADX) + minusDM * alphaADX) : minusDM;
-
-      if (smTR > 0) {
-        plusDI = 100 * (smPlusDM / smTR);
-        minusDI = 100 * (smMinusDM / smTR);
+    let adx = 0;
+    if (ticks.length >= 14) {
+      let trSum = 0, pdmSum = 0, mdmSum = 0;
+      for (let i = 0; i < 14; i++) {
+        const curr = i === 0 ? { price } : ticks[ticks.length - i];
+        const prev = i === 0 ? ticks[ticks.length - 1] : ticks[ticks.length - i - 1];
+        const tr = Math.abs(curr.price - prev.price);
+        const pdm = curr.price > prev.price ? curr.price - prev.price : 0;
+        const mdm = prev.price > curr.price ? prev.price - curr.price : 0;
+        trSum += tr; pdmSum += pdm; mdmSum += mdm;
       }
-      const dx = (plusDI + minusDI) > 0 ? (100 * Math.abs(plusDI - minusDI) / (plusDI + minusDI)) : 0;
-      // Correct ADX Smoothing: Average of DX
-      adx = (prevTick && prevTick.adx) ? (prevTick.adx * (1 - alphaADX) + dx * alphaADX) : dx;
+      const pDI = trSum > 0 ? (pdmSum / trSum) * 100 : 0;
+      const mDI = trSum > 0 ? (mdmSum / trSum) * 100 : 0;
+      const dx = (pDI + mDI) > 0 ? (Math.abs(pDI - mDI) / (pDI + mDI)) * 100 : 0;
+      adx = prevTick && prevTick.adx ? (prevTick.adx * 13 + dx) / 14 : dx;
     }
 
-    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, ema10, smTR, smPlusDM, smMinusDM, plusDI, minusDI, adx: adx || 0 };
-    ticks.push(state); if (ticks.length > TICK_BUF) ticks.shift();
-
-    // Bollinger Bands (10, EMA, 2)
     if (ticks.length >= 10) {
       const slice = ticks.slice(-10);
-      const prices = slice.map(t => t.price);
-      const middle = ema10;
-      const sumSq = prices.reduce((acc, p) => acc + Math.pow(p - middle, 2), 0);
-      const stdDev = Math.sqrt(sumSq / 10);
-      state.bb = { middle, upper: middle + (2 * stdDev), lower: middle - (2 * stdDev) };
-      bbWidth = state.bb.upper - state.bb.lower;
-
-      // EMA Slope
-      state.bb.slope = (prevTick && prevTick.bb) ? (state.bb.middle - prevTick.bb.middle) : 0;
+      const sqDiffSum = slice.reduce((a, b) => a + Math.pow(b.price - ema10, 2), 0);
+      const stdDev = Math.sqrt(sqDiffSum / 10);
+      bbWidth = stdDev * 4; // Upper - Lower = 4 * stdDev
     }
 
+    if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
+    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, ema10, adx };
+    ticks.push(state); if (ticks.length > TICK_BUF) ticks.shift();
     speedHistory.push(absSpeed); if (speedHistory.length > SPEED_BUF) speedHistory.shift();
     calculatePercentiles(); lastTickProcessedAt = Date.now();
 
@@ -353,13 +305,20 @@
     });
   }
 
-  // ── Signal Detection Logic (Unleashed High-Activity Version) ─────────────
+  // ── Signal Detection Logic (Master Version) ───────────────────────────────
   function detectSignal() {
     const n = ticks.length; if (n < 2) return null;
     const t0 = ticks[n - 1], tMinus1 = ticks[n - 2], mode = cfg.strategyMode, eps = cfg.epsilon;
     const streak = Math.max(t0.upStreak, t0.downStreak), isEarly = streak <= 2, isLate = streak >= 4;
     const buyDigits = [0, 5, 6, 7], sellDigits = [2, 3, 4, 8];
     const buyDigitBias = buyDigits.includes(t0.lastDigit), sellDigitBias = sellDigits.includes(t0.lastDigit);
+
+    // Filter indicators
+    const currentADX = t0.adx || 0;
+    const minADX = cfg.minADX || 25;
+    const minBBW = cfg.minBBWidth || 0.2;
+    const isTrending = currentADX >= minADX && bbWidth >= minBBW;
+    const emaSlope = t0.ema10 - tMinus1.ema10;
 
     // --- STRATEGY HELPERS ---
     const checkStructural = () => {
@@ -383,7 +342,6 @@
       return null;
     };
     const checkStructural2 = () => {
-      // Refined: Relaxed timing to handle fast ignition ticks
       const isCalm = (tMinus1.deltaTime >= 200 && tMinus1.deltaTime <= 2500) && (t0.deltaTime >= 200 && t0.deltaTime <= 2500);
       if (!isCalm) return null;
       if (t0.direction === 1 && tMinus1.direction === -1 && t0.deltaChange === 2) {
@@ -439,46 +397,34 @@
     };
 
     let res = null;
-    // --- TREND DIRECTION FILTER ---
-    const slope = ticks.length >= 10 ? (t0.price - ticks[ticks.length - 10].price) : 0;
 
     // Evaluation Logic
     if (mode === 'unleashed') {
-      const minADX = cfg.minADX || 25;
-      const minBBW = cfg.minBBWidth || 0.2;
-      const isStrongTrend = (t0.adx >= minADX);
-      const isExpanding = (bbWidth >= minBBW);
+      // Global Trend & Volatility Filters
+      if (!isTrending) return null;
 
-      if (n >= 4 && isStrongTrend && isExpanding) {
-        const prev3 = ticks.slice(-4, -1);
-        const localHigh = Math.max(...prev3.map(t => t.price));
-        const localLow = Math.min(...prev3.map(t => t.price));
+      const blockBuyDigits = [0, 1, 5, 8], blockSellDigits = [7, 9];
+      const isBuyBlocked = blockBuyDigits.includes(t0.lastDigit), isSellBlocked = blockSellDigits.includes(t0.lastDigit);
 
+      const localSlice = ticks.slice(-3);
+      const localHigh = Math.max(...localSlice.map(x => x.price)), localLow = Math.min(...localSlice.map(x => x.price));
+      const isBreakout = t0.price >= localHigh || t0.price <= localLow;
+      const intensityBypass = t0.intensity > 1.5;
+
+      // Use EMA Slope for crossing and trend alignment
+      const earlyCrossing = (tMinus1.price < tMinus1.ema10 && t0.price >= t0.ema10 && emaSlope > 0.005) ? 'BUY' :
+                            (tMinus1.price > tMinus1.ema10 && t0.price <= t0.ema10 && emaSlope < -0.005) ? 'SELL' : null;
+
+      if (earlyCrossing) {
+        res = { type: earlyCrossing, conf: 92, triggerDesc: 'EARLY-CROSS' };
+      } else if (isBreakout || intensityBypass) {
         res = checkPowerStep() || checkMomentumIgnition() || checkReversalFlip();
+      }
 
-        if (res) {
-          const digit = t0.lastDigit;
-          const isHighIntensityCross = t0.intensity > 1.5 && t0.bb && tMinus1.bb && (
-            (res.type === 'BUY' && tMinus1.price < tMinus1.bb.middle && t0.price >= t0.bb.middle) ||
-            (res.type === 'SELL' && tMinus1.price > tMinus1.bb.middle && t0.price <= t0.bb.middle)
-          );
-
-          if (res.type === 'BUY') {
-            const isBreakout = t0.price >= localHigh || isHighIntensityCross;
-            const isBlockedDigit = [0, 1, 5, 8].includes(digit);
-            if (!isBreakout || isBlockedDigit) res = null;
-          } else if (res.type === 'SELL') {
-            const isBreakout = t0.price <= localLow || isHighIntensityCross;
-            const isBlockedDigit = [7, 9].includes(digit); // Removed Digit 2 from SELL block list
-            if (!isBreakout || isBlockedDigit) res = null;
-          }
-        }
-
-        // Trend Alignment: Sell in downtrends, Buy in uptrends
-        if (res) {
-          if (slope > 0.1 && res.type === 'SELL') res = null;
-          if (slope < -0.1 && res.type === 'BUY') res = null;
-        }
+      if (res) {
+        // Trend Alignment using EMA Slope
+        if (res.type === 'BUY' && (isBuyBlocked || emaSlope < -0.01)) res = null;
+        if (res.type === 'SELL' && (isSellBlocked || emaSlope > 0.01)) res = null;
       }
     }
     else if (mode === 'ignitionSuite') { if (streak < 4) res = checkReversalFlip() || checkMomentumIgnition(); }
@@ -490,27 +436,18 @@
     else if (mode === 'structural') res = checkStructural();
     else if (mode === 'hybrid') res = checkIgnition() || checkPowerStep() || checkMomentumIgnition() || checkHybrid() || checkStructural2();
     else if (mode === 'momentum') res = checkMomentum() || checkMomentumIgnition() || checkPowerStep() || checkHybrid() || checkStructural2();
+    else if (mode === 'trendIgnition') res = checkTrendIgnition();
+    else if (mode === 'reversalIgnition') res = checkReversalIgnition();
+    else if (mode === 'ignition') res = checkIgnition() || checkPowerStep();
+    else if (mode === 'structural3') res = checkPowerStep() || checkStructural2();
+    else if (mode === 'structural2') res = checkStructural2();
+    else if (mode === 'structural') res = checkStructural();
+    else if (mode === 'hybrid') res = checkIgnition() || checkPowerStep() || checkMomentumIgnition() || checkHybrid() || checkStructural2();
+    else if (mode === 'momentum') res = checkMomentum() || checkMomentumIgnition() || checkPowerStep() || checkHybrid() || checkStructural2();
     else if (mode === 'reversal') res = checkReversal() || checkReversalFlip();
 
     if (res) {
-      // Refined Global Bollinger Filter (Early Entry logic)
-      if (t0.bb && tMinus1.bb) {
-        const isCrossingUp = (tMinus1.price < tMinus1.bb.middle && t0.price >= t0.bb.middle);
-        const isCrossingDown = (tMinus1.price > tMinus1.bb.middle && t0.price <= t0.bb.middle);
-        const isUpSlope = t0.bb.slope > 0;
-        const isDownSlope = t0.bb.slope < 0;
-
-        if (res.type === 'BUY') {
-          const isValidBuy = (t0.price >= t0.bb.middle) || (isCrossingUp && isUpSlope);
-          if (!isValidBuy) res = null;
-        } else if (res.type === 'SELL') {
-          const isValidSell = (t0.price <= t0.bb.middle) || (isCrossingDown && isDownSlope);
-          if (!isValidSell) res = null;
-        }
-      }
-    }
-
-    if (res) {
+      if (res) {
         const currentTickIndex = tickSeq;
         if (currentTickIndex - lastSignalTickIndex < cfg.postTradeCooldownTicks || Date.now() - lastTradeClosedAt < cfg.postTradeCooldownMs || realExecState !== 'IDLE') return null;
         lastSignalTickIndex = currentTickIndex;
@@ -526,11 +463,10 @@
         confidence: Math.min(100, conf),
         strategy: mode,
         isReal: cfg.realTradeEnabled,
-        triggerDigit: res.triggerDigit || t0.lastDigit,
+          triggerDigit: res.triggerDigit || t0.lastDigit,
         triggerDesc: res.triggerDesc,
-        startTickIndex: cfg.realTradeEnabled ? null : (res.startTickIndex || tickSeq + 1),
-        signalTime: Date.now(),
-        confirmTime: null
+          startTickIndex: res.startTickIndex || tickSeq + 1,
+          startTime: Date.now()
       };
         signals.push(sig); if (signals.length > 50) signals.shift(); recordSessionTrade(sig); updateSignalsUI();
         if (cfg.realTradeEnabled) { realExecState = 'OPEN_PENDING'; realLockReason = 'EXECUTING'; updateRealUI(); executeRealTrade(res.type); }
@@ -582,15 +518,15 @@
   function recordSessionTrade(sig) { sessionTradesAll.push(sig); if (sessionTradesAll.length > SESSION_HISTORY_CAP) sessionTradesAll.shift(); }
   function exportCSV() {
     if (!sessionTradesAll.length) return;
-    const rows = [['Type', 'Strategy', 'Confidence', 'Price', 'Tick Time', 'Result', 'Trigger Digit', 'Trigger Desc', 'Start Tick', 'Signal Time', 'Confirm Time']].concat(sessionTradesAll.map(s => [s.type, s.strategy, s.confidence, s.price.toFixed(2), s.time, s.result, s.triggerDigit ?? '', s.triggerDesc ?? '', s.startTickIndex ?? '', s.signalTime ? new Date(s.signalTime).toISOString() : '', s.confirmTime ? new Date(s.confirmTime).toISOString() : '']));
+    const rows = [['Type', 'Strategy', 'Confidence', 'Price', 'Time', 'Result', 'Trigger Digit', 'Trigger Desc', 'Start Tick', 'Confirm Time']].concat(sessionTradesAll.map(s => [s.type, s.strategy, s.confidence, s.price.toFixed(2), s.time, s.result, s.triggerDigit ?? '', s.triggerDesc ?? '', s.startTickIndex ?? '', s.startTime ? new Date(s.startTime).toISOString() : '']));
     const csv = rows.map(r => r.join(',')).join('\n'); const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = '3tick-signals.csv'; a.click();
   }
   function exportRealCSV() {
     if (!realTrades.length) return;
-    const rows = [['Tick Time', 'Signal', 'Side', 'Result', 'PnL', 'Trigger Digit', 'Trigger Desc', 'Start Tick', 'Signal Time', 'Confirm Time']].concat(realTrades.map(t => {
+    const rows = [['Time', 'Signal', 'Side', 'Result', 'PnL', 'Trigger Digit', 'Trigger Desc', 'Start Tick', 'Confirm Time']].concat(realTrades.map(t => {
       const s = t.signalRef || {};
-      return [new Date(t.time).toISOString(), t.signal, t.side, t.result, t.pnl || '', s.triggerDigit ?? '', s.triggerDesc ?? '', t.startTickIndex ?? '', t.signalTime ? new Date(t.signalTime).toISOString() : (s.signalTime ? new Date(s.signalTime).toISOString() : ''), t.confirmTime ? new Date(t.confirmTime).toISOString() : ''];
+      return [new Date(t.time).toISOString(), t.signal, t.side, t.result, t.pnl || '', s.triggerDigit ?? '', s.triggerDesc ?? '', t.startTickIndex ?? '', t.startTime ? new Date(t.startTime).toISOString() : ''];
     }));
     const csv = rows.map(r => r.join(',')).join('\n'); const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = '3tick-real.csv'; a.click();
@@ -633,13 +569,13 @@
         if (sig) {
           // Corrected: The contract starts on the NEXT tick, not the current one
           sig.startTickIndex = tickSeq + 1;
-          sig.confirmTime = Date.now();
+          sig.startTime = Date.now();
           console.log(`[System] Contract Confirmed. Start Tick anchored at: ${sig.startTickIndex}`);
 
           const real = realTrades.find(t => t.result === 'PENDING' && !t.startTickIndex);
           if (real) {
             real.startTickIndex = sig.startTickIndex;
-            real.confirmTime = sig.confirmTime;
+            real.startTime = sig.startTime;
           }
         }
       }
@@ -669,13 +605,13 @@
       let count = text.includes('no open positions') ? 0 : (text.match(/(\d+)\s+open\s+position/i) ? parseInt(text.match(/(\d+)\s+open\s+position/i)[1], 10) : realOpenCount);
       let closedResult = null;
 
-      // EXPLICIT WIN/LOSS DETECTION (Checking for negative sign or '-10')
+      // EXPLICIT WIN/LOSS DETECTION (Strictly negative sign = LOSS)
       let isDefiniteLoss = false;
       const pnlElFinal = flyout.querySelector('.dc-contract-card__profit-loss-label, .dc-status-colored-text, .dc-contract-card-item__body--profit span[data-testid="dt_span"], .dc-contract-card-item__body--loss span[data-testid="dt_span"]');
 
       if (pnlElFinal) {
         const pnlText = pnlElFinal.innerText;
-        if (pnlText.includes('-') || pnlText.includes('-10')) {
+        if (pnlText.includes('-')) {
           isDefiniteLoss = true;
         }
       }
@@ -746,7 +682,7 @@
       const btn = document.querySelector(SEL_PURCHASE_BTN); if (!btn || !btn.classList.contains(activeClass)) throw new Error('btn_mismatch');
       simulateExternalClick(btn); lastRealTradeAt = Date.now();
       const signalToMark = signals.find(s => s.result === 'PENDING' && s.isReal);
-      realTrades.push({ time: Date.now(), signal: side, side: buyLabel, result: 'PENDING', signalRef: signalToMark, startTickIndex: null, signalTime: Date.now(), confirmTime: null });
+      realTrades.push({ time: Date.now(), signal: side, side: buyLabel, result: 'PENDING', signalRef: signalToMark, startTickIndex: null, startTime: null });
       realExecTimer = setTimeout(() => { if (['OPEN_PENDING', 'OPEN'].includes(realExecState)) { realExecState = 'RECOVERY'; realLockReason = 'TIMEOUT'; updateRealUI(); } }, cfg.realTimeoutMs);
     } catch (e) { realLockReason = 'ERR:' + e.message; updateRealUI(); setTimeout(() => { if (realExecState === 'OPEN_PENDING') { realExecState = 'IDLE'; realLockReason = ''; updateRealUI(); } }, 3000); }
   }
