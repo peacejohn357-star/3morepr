@@ -65,7 +65,7 @@
   let flyoutObserver = null, ws = null, wsState = 'disconnected', reconnectTimer = null, resolvedSymbol = null, manualClose = false, reconnectDelay = RECONNECT_BASE, failCount = 0, usingFallback = false, finalizationTimer = null;
 
   // UI Cache to prevent redundant DOM updates
-  let lastUI = { state: '', pnl: null, wins: -1, losses: -1, price: '', stats: '', dist: '', dirStreak: '' };
+  let lastUI = { state: '', pnl: null, wins: -1, losses: -1, price: '', stats: '', dist: '', dirStreak: '', unleashed: '' };
 
   // ── Overlay Build ─────────────────────────────────────────────────────────
   function buildOverlay() {
@@ -85,6 +85,7 @@
         <div class="tt-row"><span class="tt-label">Mean / Std</span><span class="tt-val" id="tt-speed-dist">0.00 / 0.00</span></div>
         <div class="tt-row"><span class="tt-label">ADX / BB_W</span><span class="tt-val" id="tt-adx-stats">0 / 0.00</span></div>
         <div class="tt-row"><span class="tt-label">RSI / Trend</span><span class="tt-val" id="tt-rsi-stats">0 / 0.00</span></div>
+        <div class="tt-row"><span class="tt-label">Int/Eps/Accel</span><span class="tt-val" id="tt-unleashed-stats">0 / 0 / 0.0000</span></div>
         <div class="tt-row"><span class="tt-label">Session W/L</span><span class="tt-val"><span id="tt-wins">0</span> / <span id="tt-losses">0</span></span></div>
         <div id="tt-signals-list"></div>
         <div class="tt-config-section-label">Real Execution</div>
@@ -214,10 +215,12 @@
   }
 
   function updateStatsUI() {
+    const t0 = ticks[ticks.length - 1];
+    if (!t0) return;
+
     const statsVal = `${sLow.toFixed(4)} / ${sHigh.toFixed(4)}`;
     const distVal = `${speedMean.toFixed(4)} / ${speedStd.toFixed(4)}`;
-    const t0 = ticks[ticks.length - 1];
-    const currentADX = t0?.adx || 0;
+    const currentADX = t0.adx || 0;
     const adxVal = `${currentADX.toFixed(2)} / ${bbWidth.toFixed(2)}`;
 
     if (lastUI.stats !== statsVal) {
@@ -241,17 +244,49 @@
       lastUI.adx = adxVal;
     }
 
-    const currentRSI = t0?.rsi || 50;
-    const currentTrend = t0?.trendEma || 0;
+    const currentRSI = t0.rsi || 50;
+    const currentTrend = t0.trendEma || 0;
     const rsiTrendVal = `${currentRSI.toFixed(1)} / ${currentTrend.toFixed(2)}`;
     if (lastUI.rsiTrend !== rsiTrendVal) {
       const el = document.getElementById('tt-rsi-stats');
       if (el) {
         el.textContent = rsiTrendVal;
-        const isUp = t0?.price > currentTrend;
+        const isUp = t0.price > currentTrend;
         el.style.color = isUp ? '#3ecf60' : '#e04040';
       }
       lastUI.rsiTrend = rsiTrendVal;
+    }
+
+    const currentIntensity = t0.intensity || 0;
+    const currentEpsilon   = t0.deltaChange || 0;
+    const currentAccel     = t0.accel5 || 0;
+    const unleashedVal = `${currentIntensity.toFixed(2)} / ${currentEpsilon} / ${currentAccel.toFixed(4)}`;
+    if (lastUI.unleashed !== unleashedVal) {
+      const el = document.getElementById('tt-unleashed-stats');
+      if (el) {
+        el.textContent = unleashedVal;
+        let ok = true;
+        if (cfg.strategyMode === 'unleashed') {
+          const isUp = t0.direction === 1, isDown = t0.direction === -1;
+          if (isUp) {
+            if (cfg.minIntensity !== undefined && currentIntensity < cfg.minIntensity) ok = false;
+            if (cfg.maxIntensity !== undefined && currentIntensity > cfg.maxIntensity) ok = false;
+            if (cfg.epsilon !== undefined && currentEpsilon < cfg.epsilon) ok = false;
+            if (cfg.maxEpsilon !== undefined && currentEpsilon > cfg.maxEpsilon) ok = false;
+            if (cfg.accelBuyMin !== undefined && currentAccel < cfg.accelBuyMin) ok = false;
+            if (cfg.accelBuyMax !== undefined && currentAccel > cfg.accelBuyMax) ok = false;
+          } else if (isDown) {
+            if (cfg.minIntensity !== undefined && currentIntensity < cfg.minIntensity) ok = false;
+            if (cfg.maxIntensity !== undefined && currentIntensity > cfg.maxIntensity) ok = false;
+            if (cfg.epsilon !== undefined && currentEpsilon > -cfg.epsilon) ok = false;
+            if (cfg.maxEpsilon !== undefined && currentEpsilon < -cfg.maxEpsilon) ok = false;
+            if (cfg.accelSellMin !== undefined && currentAccel < cfg.accelSellMin) ok = false;
+            if (cfg.accelSellMax !== undefined && currentAccel > cfg.accelSellMax) ok = false;
+          } else ok = false;
+        }
+        el.style.color = ok ? '#3ecf60' : '#7a8499';
+      }
+      lastUI.unleashed = unleashedVal;
     }
   }
 
@@ -264,7 +299,7 @@
       sHigh = Math.max(p70, speedMean + speedStd); sLow = Math.min(p30, Math.max(0, speedMean - speedStd));
     }
 
-    if (tickSeq % 5 === 0) updateStatsUI();
+    if (cfg.strategyMode === 'unleashed' || tickSeq % 5 === 0) updateStatsUI();
   }
 
   function handleTick(tick) {
