@@ -47,7 +47,10 @@
     maxBBWidth: undefined,
     minIntensity: undefined,
     maxIntensity: undefined,
-    maxEpsilon: undefined,
+    epsBuyMin: undefined,
+    epsBuyMax: undefined,
+    epsSellMin: undefined,
+    epsSellMax: undefined,
     accelBuyMin: undefined,
     accelBuyMax: undefined,
     accelSellMin: undefined,
@@ -437,21 +440,21 @@
     // --- STRATEGY HELPERS ---
     const checkStructural = () => {
       const bEpsOk = cfg.epsBuyMin !== undefined ? (t0.deltaChange >= cfg.epsBuyMin && t0.deltaChange <= (cfg.epsBuyMax || 999)) : (t0.deltaChange > eps);
-      const sEpsOk = cfg.epsSellMax !== undefined ? (t0.deltaChange <= cfg.epsSellMax && t0.deltaChange >= (cfg.epsSellMin || -999)) : (t0.deltaChange < -eps);
+      const sEpsOk = cfg.epsSellMin !== undefined ? (t0.deltaChange >= cfg.epsSellMin && t0.deltaChange <= (cfg.epsSellMax || 999)) : (t0.deltaChange < -eps);
       if (buyDigitBias && bEpsOk) return { type: 'BUY', conf: 70 };
       if (sellDigitBias && sEpsOk) return { type: 'SELL', conf: 70 };
       return null;
     };
     const checkHybrid = () => {
       const bEpsOk = cfg.epsBuyMin !== undefined ? (t0.deltaChange >= cfg.epsBuyMin && t0.deltaChange <= (cfg.epsBuyMax || 999)) : (t0.deltaChange > eps);
-      const sEpsOk = cfg.epsSellMax !== undefined ? (t0.deltaChange <= cfg.epsSellMax && t0.deltaChange >= (cfg.epsSellMin || -999)) : (t0.deltaChange < -eps);
+      const sEpsOk = cfg.epsSellMin !== undefined ? (t0.deltaChange >= cfg.epsSellMin && t0.deltaChange <= (cfg.epsSellMax || 999)) : (t0.deltaChange < -eps);
       if (buyDigitBias && bEpsOk && isEarly && t0.speedTrend > 0) return { type: 'BUY', conf: 95 };
       if (sellDigitBias && sEpsOk && isEarly && t0.speedTrend > 0) return { type: 'SELL', conf: 95 };
       return null;
     };
     const checkMomentum = () => {
       const bEpsOk = cfg.epsBuyMin !== undefined ? (t0.deltaChange >= cfg.epsBuyMin && t0.deltaChange <= (cfg.epsBuyMax || 999)) : (t0.deltaChange > eps);
-      const sEpsOk = cfg.epsSellMax !== undefined ? (t0.deltaChange <= cfg.epsSellMax && t0.deltaChange >= (cfg.epsSellMin || -999)) : (t0.deltaChange < -eps);
+      const sEpsOk = cfg.epsSellMin !== undefined ? (t0.deltaChange >= cfg.epsSellMin && t0.deltaChange <= (cfg.epsSellMax || 999)) : (t0.deltaChange < -eps);
       if (t0.direction === 1 && isEarly && bEpsOk && t0.speedTrend > 0 && t0.absSpeed < sHigh) return { type: 'BUY', conf: 85 };
       if (t0.direction === -1 && isEarly && sEpsOk && t0.speedTrend > 0 && t0.absSpeed < sHigh) return { type: 'SELL', conf: 85 };
       return null;
