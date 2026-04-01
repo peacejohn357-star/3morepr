@@ -13,7 +13,7 @@
   const SPEED_BUF       = 100;
   const RECONNECT_BASE  = 4000;
   const RECONNECT_MAX   = 64000;
-  const SESSION_HISTORY_CAP = 5000;
+  const SESSION_HISTORY_CAP = 30000;
   const WATCHDOG_INTERVAL   = 5000;
   const WATCHDOG_TICK_TIMEOUT = 25000;
 
@@ -98,7 +98,10 @@
           <button id="tt-real-export">Download Real CSV</button>
           <button id="tt-real-reset" style="background:#3d1a1a;color:#e04040;margin-top:2px;">Reset Engine</button>
         </div>
-        <button id="tt-config-toggle">Settings</button>
+        <div style="display:flex;gap:4px;margin-top:4px;">
+          <button id="tt-config-toggle" style="flex:1;">Settings</button>
+          <button id="tt-clear-logs" style="flex:1;background:#3d1a1a;color:#e04040;font-size:10px;border:1px solid #7a3a10;border-radius:4px;cursor:pointer;">Clear Logs</button>
+        </div>
         <div id="tt-config">
           <div class="tt-config-row"><label>Mode</label><select id="tt-cfg-strategy-mode"><option value="unleashed">🔥 Unleashed High-Activity</option><option value="trendIgnition">🚀 Trend Ignition</option><option value="reversalIgnition">🔄 Reversal Ignition</option><option value="ignitionSuite">Full Ignition Suite</option><option value="ignition">Ignition</option><option value="structural3">Structural 3</option><option value="structural2">Structural 2</option><option value="structural">Structural</option><option value="hybrid">Hybrid</option><option value="momentum">Momentum</option><option value="reversal">Reversal</option></select></div>
           <div class="tt-config-row"><label>Trend EMA Period</label><input type="number" id="tt-cfg-trend-ema" min="2" max="100" step="1" value="15"></div>
@@ -177,6 +180,7 @@
     document.getElementById('tt-cfg-real-enabled').addEventListener('change', function () { cfg.realTradeEnabled = this.checked; saveCfg(); });
     document.getElementById('tt-real-export').addEventListener('click', exportRealCSV);
     document.getElementById('tt-real-reset').addEventListener('click', () => { if (confirm('Reset real-trade engine to IDLE and clear lock?')) { realExecState = 'IDLE'; realLockReason = ''; realOpenCount = 0; clearTimeout(realExecTimer); updateRealUI(); } });
+    document.getElementById('tt-clear-logs').addEventListener('click', () => { if (confirm('Clear all session signal and tick logs?')) { sessionTradesAll = []; signals = []; realTrades = []; updateSignalsUI(); showAlert('Logs cleared'); } });
     document.getElementById('tt-export').addEventListener('click', exportCSV);
     applyConfigToUI();
   }
@@ -377,6 +381,33 @@
     ticks.push(state); if (ticks.length > TICK_BUF) ticks.shift();
     speedHistory.push(absSpeed); if (speedHistory.length > SPEED_BUF) speedHistory.shift();
     calculatePercentiles(); lastTickProcessedAt = Date.now();
+
+    // ── Continuous Logging for Unleashed ──
+    if (cfg.strategyMode === 'unleashed') {
+      const tickSnapshot = {
+        type: 'TICK',
+        strategy: 'unleashed',
+        price: price,
+        time: epoch,
+        result: '-',
+        metrics: {
+          rsi: rsi,
+          adx: adx,
+          bbw: bbWidth,
+          intensity: intensity,
+          epsilon: deltaChangeVal,
+          accel: accel5 || 0,
+          sLow: sLow,
+          sHigh: sHigh,
+          trend: trendEma,
+          dir: direction,
+          streak: Math.max(upStreak, downStreak),
+          mean: speedMean,
+          std: speedStd
+        }
+      };
+      recordSessionTrade(tickSnapshot);
+    }
 
     const priceStr = price.toFixed(2);
     if (lastUI.price !== priceStr) {
@@ -643,7 +674,12 @@
           epsilon: t0.deltaChange,
           accel: t0.accel5 || 0,
           sLow: sLow,
-          sHigh: sHigh
+          sHigh: sHigh,
+          trend: t0.trendEma,
+          dir: t0.direction,
+          streak: Math.max(t0.upStreak, t0.downStreak),
+          mean: speedMean,
+          std: speedStd
         }
       };
         signals.push(sig); if (signals.length > 50) signals.shift(); recordSessionTrade(sig); updateSignalsUI();
@@ -695,10 +731,10 @@
   function recordSessionTrade(sig) { sessionTradesAll.push(sig); if (sessionTradesAll.length > SESSION_HISTORY_CAP) sessionTradesAll.shift(); }
   function exportCSV() {
     if (!sessionTradesAll.length) return;
-    const head = ['Type', 'Strategy', 'Price', 'Tick Time', 'Signal Time', 'Confirm Time', 'Result', 'Digit', 'Desc', 'Sig RSI', 'Sig ADX', 'Sig BBW', 'Sig Int', 'Sig Eps', 'Sig Accel', 'Sig SLow', 'Sig SHigh', 'Conf RSI', 'Conf ADX', 'Conf BBW', 'Conf Int', 'Conf Eps', 'Conf Accel', 'Conf SLow', 'Conf SHigh'];
+    const head = ['Type', 'Strategy', 'Price', 'Tick Time', 'Signal Time', 'Confirm Time', 'Result', 'Digit', 'Desc', 'RSI', 'ADX', 'BBW', 'Intensity', 'Epsilon', 'Accel', 'SLow', 'SHigh', 'Trend', 'Dir', 'Streak', 'Mean', 'Std', 'Conf RSI', 'Conf ADX', 'Conf BBW', 'Conf Int', 'Conf Eps', 'Conf Accel', 'Conf SLow', 'Conf SHigh'];
     const rows = [head].concat(sessionTradesAll.map(s => {
       const m = s.metrics || {}, cm = s.confirmMetrics || {};
-      return [s.type, s.strategy, s.price.toFixed(2), s.time, s.signalTime || '', s.confirmTime || '', s.result, s.triggerDigit ?? '', s.triggerDesc ?? '', m.rsi??'', m.adx??'', m.bbw??'', m.intensity??'', m.epsilon??'', m.accel??'', m.sLow??'', m.sHigh??'', cm.rsi??'', cm.adx??'', cm.bbw??'', cm.intensity??'', cm.epsilon??'', cm.accel??'', cm.sLow??'', cm.sHigh??''];
+      return [s.type, s.strategy, s.price.toFixed(2), s.time, s.signalTime || '', s.confirmTime || '', s.result, s.triggerDigit ?? '', s.triggerDesc ?? '', m.rsi??'', m.adx??'', m.bbw??'', m.intensity??'', m.epsilon??'', m.accel??'', m.sLow??'', m.sHigh??'', m.trend??'', m.dir??'', m.streak??'', m.mean??'', m.std??'', cm.rsi??'', cm.adx??'', cm.bbw??'', cm.intensity??'', cm.epsilon??'', cm.accel??'', cm.sLow??'', cm.sHigh??''];
     }));
     const csv = rows.map(r => r.join(',')).join('\n'); const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = '3tick-signals.csv'; a.click();
