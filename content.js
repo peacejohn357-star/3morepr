@@ -279,39 +279,7 @@
 
     let displayScore = 0;
     if (cfg.strategyMode === 'unleashed' && cfg.scoreThreshold !== undefined) {
-       // Calculate score for UI
-       let score = 0;
-       const isUp = t0.direction === 1;
-       const isDown = t0.direction === -1;
-       const n = ticks.length;
-       const tMinus1 = n >= 2 ? ticks[n-2] : t0;
-
-       if ((isUp && t0.price > t0.trendEma) || (isDown && t0.price < t0.trendEma)) score += 3;
-       if ((isUp && t0.upStreak >= 2) || (isDown && t0.downStreak >= 2)) score += 2;
-
-       const last5Int = ticks.slice(-5).map(t => t.intensity);
-       const avgInt = last5Int.length ? last5Int.reduce((a,b)=>a+b,0)/last5Int.length : 0;
-       const minInt = cfg.minIntensity || 1.2;
-       if (t0.intensity >= minInt && t0.intensity > avgInt) score += 2;
-
-       const prevBBW = n >= 2 ? ticks[n-2].bbWidth || bbWidth : bbWidth;
-       const isExpanding = bbWidth > prevBBW;
-       const priceSlope = t0.price - tMinus1.price;
-       if (isExpanding && ((isUp && priceSlope > 0) || (isDown && priceSlope < 0))) score += 2;
-
-       if ((isUp && t0.rsi > (tMinus1.rsi || 50)) || (isDown && t0.rsi < (tMinus1.rsi || 50))) score += 1;
-       if (t0.adx > (tMinus1.adx || 0)) score += 1;
-
-       if ((isUp && t0.accel5 > 0) || (isDown && t0.accel5 < 0)) score += 1;
-       if ((isUp && t0.deltaChange > 0) || (isDown && t0.deltaChange < 0)) score += 1;
-       if (Math.abs(t0.price - t0.trendEma) > (speedStd * 2) || t0.absSpeed > speedMean) score += 1;
-
-       if (isExpanding && t0.adx > (tMinus1.adx || 0)) score *= 1.2;
-       if (cfg.minBBWidth !== undefined && bbWidth < cfg.minBBWidth) score = 0;
-       const p5 = ticks.length >= 6 ? ticks[ticks.length - 6].price : t0.price;
-       if (Math.abs(t0.price - p5) < 0.2) score = 0;
-
-       displayScore = score;
+       displayScore = calculateSurgicalScore(t0.direction === 1);
     }
 
     const unleashedVal = `${currentIntensity.toFixed(1)}/${currentEpsilon}/${currentAccel.toFixed(3)}/${displayScore.toFixed(0)}`;
@@ -361,6 +329,77 @@
     }
 
     if (cfg.strategyMode === 'unleashed' || tickSeq % 5 === 0) updateStatsUI();
+  }
+
+  function calculateSurgicalScore(isBuy) {
+    const n = ticks.length;
+    if (n < 2) return 0;
+    const t0 = ticks[n - 1];
+    const tMinus1 = ticks[n - 2];
+    let score = 0;
+
+    if (isBuy) {
+      // Category A: Structure (Max 8)
+      if (t0.price > t0.trendEma) score += 5;
+      if (t0.upStreak >= 2) score += 3;
+      else if (t0.upStreak === 1) score += 1;
+
+      // Category B: Pressure (Max 8)
+      const last5Int = ticks.slice(-5).map(t => t.intensity);
+      const avgInt = last5Int.length ? last5Int.reduce((a,b)=>a+b,0)/last5Int.length : 0;
+      const minInt = cfg.minIntensity || 1.2;
+      if (t0.intensity >= minInt && t0.intensity > avgInt) score += 4;
+
+      const prevBBW = tMinus1.bbWidth || bbWidth;
+      const isExpanding = bbWidth > prevBBW;
+      const priceSlope = t0.price - tMinus1.price;
+      if (isExpanding && priceSlope > 0) score += 4;
+
+      // Category C: Timing (Max 8)
+      if (t0.rsi > (tMinus1.rsi || 50)) score += 2;
+      if (t0.adx > (tMinus1.adx || 0)) score += 2;
+      if (t0.accel5 > 0) score += 1;
+      if (t0.deltaChange > 0) score += 1;
+      const isFar = Math.abs(t0.price - t0.trendEma) > (speedStd * 2);
+      const isFast = t0.absSpeed > speedMean;
+      if (isFar || isFast) score += 2;
+
+      if (isExpanding && t0.adx > (tMinus1.adx || 0)) score *= 1.2;
+
+      if (cfg.minBBWidth !== undefined && bbWidth < cfg.minBBWidth) score = 0;
+      const p5 = n >= 6 ? ticks[n - 6].price : t0.price;
+      if (Math.abs(t0.price - p5) < 0.2) score = 0;
+    } else {
+      // SELL Logic
+      if (t0.price < t0.trendEma) score += 5;
+      if (t0.downStreak >= 2) score += 3;
+      else if (t0.downStreak === 1) score += 1;
+
+      const last5Int = ticks.slice(-5).map(t => t.intensity);
+      const avgInt = last5Int.length ? last5Int.reduce((a,b)=>a+b,0)/last5Int.length : 0;
+      const minInt = cfg.minIntensity || 1.2;
+      if (t0.intensity >= minInt && t0.intensity > avgInt) score += 4;
+
+      const prevBBW = tMinus1.bbWidth || bbWidth;
+      const isExpanding = bbWidth > prevBBW;
+      const priceSlope = t0.price - tMinus1.price;
+      if (isExpanding && priceSlope < 0) score += 4;
+
+      if (t0.rsi < (tMinus1.rsi || 50)) score += 2;
+      if (t0.adx > (tMinus1.adx || 0)) score += 2;
+      if (t0.accel5 < 0) score += 1;
+      if (t0.deltaChange < 0) score += 1;
+      const isFar = Math.abs(t0.price - t0.trendEma) > (speedStd * 2);
+      const isFast = t0.absSpeed > speedMean;
+      if (isFar || isFast) score += 2;
+
+      if (isExpanding && t0.adx > (tMinus1.adx || 0)) score *= 1.2;
+
+      if (cfg.minBBWidth !== undefined && bbWidth < cfg.minBBWidth) score = 0;
+      const p5 = n >= 6 ? ticks[n - 6].price : t0.price;
+      if (Math.abs(t0.price - p5) < 0.2) score = 0;
+    }
+    return score;
   }
 
   function handleTick(tick) {
@@ -428,7 +467,7 @@
     const accel5 = prevTick ? Math.round((speed5 - (prevTick.speed5 || 0)) * 100000) / 100000 : 0;
 
     if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
-    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, trendEma, ema10: trendEma, adx, rsi, speed5, accel5 };
+    const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, trendEma, ema10: trendEma, adx, rsi, speed5, accel5, bbWidth };
     ticks.push(state); if (ticks.length > TICK_BUF) ticks.shift();
     speedHistory.push(absSpeed); if (speedHistory.length > SPEED_BUF) speedHistory.shift();
     calculatePercentiles(); lastTickProcessedAt = Date.now();
@@ -518,8 +557,6 @@
     const adxMax = (cfg.adxMax !== undefined) ? cfg.adxMax : 100;
     const minBBW = (cfg.minBBWidth !== undefined) ? cfg.minBBWidth : 0;
     const isTrending = (currentADX >= adxMin && currentADX <= adxMax) && bbWidth >= minBBW;
-
-    // --- STRATEGY HELPERS ---
     const checkStructural = () => {
       const bEpsOk = cfg.epsBuyMin !== undefined ? (t0.deltaChange >= cfg.epsBuyMin && t0.deltaChange <= (cfg.epsBuyMax || 999)) : (t0.deltaChange > eps);
       const sEpsOk = cfg.epsSellMin !== undefined ? (t0.deltaChange >= cfg.epsSellMin && t0.deltaChange <= (cfg.epsSellMax || 999)) : (t0.deltaChange < -eps);
@@ -608,48 +645,11 @@
       const currentAccel = (t0.accel5 || 0);
       const isScoring = cfg.scoreThreshold !== undefined;
 
-      // BUY Scoring/Logic
+      // BUY Logic
       let buyOk = false, buyScore = 0;
       if (isScoring) {
-          let score = 0;
-          // Category A: Structure
-          if (t0.price > t0.trendEma) score += 3;
-          if (t0.upStreak >= 2) score += 2;
-
-          // Category B: Energy
-          // Intensity Floor + Pulse Check
-          const last5Int = ticks.slice(-5).map(t => t.intensity);
-          const avgInt = last5Int.length ? last5Int.reduce((a,b)=>a+b,0)/last5Int.length : 0;
-          const minInt = cfg.minIntensity || 1.2;
-          if (t0.intensity >= minInt && t0.intensity > avgInt) score += 2;
-
-          // BBW Expansion + Direction Validation
-          const prevBBW = n >= 2 ? ticks[n-2].bbWidth || bbWidth : bbWidth;
-          const isExpanding = bbWidth > prevBBW;
-          const priceSlope = t0.price - tMinus1.price;
-          if (isExpanding && priceSlope > 0) score += 2;
-
-          // Category C: Momentum 1
-          if (t0.rsi > (tMinus1.rsi || 50)) score += 1;
-          if (t0.adx > (tMinus1.adx || 0)) score += 1;
-
-          // Category C: Momentum 2
-          if (t0.accel5 > 0) score += 1;
-          if (t0.deltaChange > 0) score += 1;
-          const isFar = Math.abs(t0.price - t0.trendEma) > (speedStd * 2);
-          const isFast = t0.absSpeed > speedMean;
-          if (isFar || isFast) score += 1;
-
-          // Multiplier: Explosive
-          if (isExpanding && t0.adx > (tMinus1.adx || 0)) score *= 1.2;
-
-          // Gatekeepers
-          if (cfg.minBBWidth !== undefined && bbWidth < cfg.minBBWidth) score = 0;
-          const p5 = ticks.length >= 6 ? ticks[ticks.length - 6].price : t0.price;
-          if (Math.abs(t0.price - p5) < 0.2) score = 0;
-
-          buyScore = score;
-          if (score >= cfg.scoreThreshold && t0.price > t0.trendEma && t0.direction === 1) buyOk = true;
+          buyScore = calculateSurgicalScore(true);
+          if (buyScore >= cfg.scoreThreshold && t0.price > t0.trendEma && t0.direction === 1) buyOk = true;
       } else {
           buyOk = (t0.direction === 1 && t0.price > t0.trendEma);
           if (buyOk) {
@@ -670,40 +670,11 @@
           }
       }
 
-      // SELL Scoring/Logic
+      // SELL Logic
       let sellOk = false, sellScore = 0;
       if (isScoring) {
-          let score = 0;
-          if (t0.price < t0.trendEma) score += 3;
-          if (t0.downStreak >= 2) score += 2;
-
-          const last5Int = ticks.slice(-5).map(t => t.intensity);
-          const avgInt = last5Int.length ? last5Int.reduce((a,b)=>a+b,0)/last5Int.length : 0;
-          const minInt = cfg.minIntensity || 1.2;
-          if (t0.intensity >= minInt && t0.intensity > avgInt) score += 2;
-
-          const prevBBW = n >= 2 ? ticks[n-2].bbWidth || bbWidth : bbWidth;
-          const isExpanding = bbWidth > prevBBW;
-          const priceSlope = t0.price - tMinus1.price;
-          if (isExpanding && priceSlope < 0) score += 2;
-
-          if (t0.rsi < (tMinus1.rsi || 50)) score += 1;
-          if (t0.adx > (tMinus1.adx || 0)) score += 1;
-
-          if (t0.accel5 < 0) score += 1;
-          if (t0.deltaChange < 0) score += 1;
-          const isFar = Math.abs(t0.price - t0.trendEma) > (speedStd * 2);
-          const isFast = t0.absSpeed > speedMean;
-          if (isFar || isFast) score += 1;
-
-          if (isExpanding && t0.adx > (tMinus1.adx || 0)) score *= 1.2;
-
-          if (cfg.minBBWidth !== undefined && bbWidth < cfg.minBBWidth) score = 0;
-          const p5 = ticks.length >= 6 ? ticks[ticks.length - 6].price : t0.price;
-          if (Math.abs(t0.price - p5) < 0.2) score = 0;
-
-          sellScore = score;
-          if (score >= cfg.scoreThreshold && t0.price < t0.trendEma && t0.direction === -1) sellOk = true;
+          sellScore = calculateSurgicalScore(false);
+          if (sellScore >= cfg.scoreThreshold && t0.price < t0.trendEma && t0.direction === -1) sellOk = true;
       } else {
           sellOk = (t0.direction === -1 && t0.price < t0.trendEma);
           if (sellOk) {
@@ -1108,6 +1079,18 @@
     }
     return false;
   }
-  function init() { if (document.getElementById('tt-overlay')) return; cfg = loadCfg(); buildOverlay(); connect(); startWatchdog(); setupFlyoutObserver(); window._tt_cfg = cfg; window._tt_detect = detectSignal; }
+  function init() {
+    if (document.getElementById('tt-overlay')) return;
+    cfg = loadCfg();
+    buildOverlay();
+    connect();
+    startWatchdog();
+    setupFlyoutObserver();
+    window._tt_cfg = cfg;
+    window._tt_detect = detectSignal;
+    window._tt_score = calculateSurgicalScore;
+    window._tt_updateUI = updateStatsUI;
+    window._tt_ticks = ticks;
+  }
   if (document.body) init(); else document.addEventListener('DOMContentLoaded', init);
 })();
