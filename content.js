@@ -88,7 +88,7 @@
         <div class="tt-row"><span class="tt-label">Mean / Std</span><span class="tt-val" id="tt-speed-dist">0.00 / 0.00</span></div>
         <div class="tt-row"><span class="tt-label">ADX / BB_W</span><span class="tt-val" id="tt-adx-stats">0 / 0.00</span></div>
         <div class="tt-row"><span class="tt-label">RSI / Trend</span><span class="tt-val" id="tt-rsi-stats">0 / 0.00</span></div>
-        <div class="tt-row"><span class="tt-label">Int/Eps/Accel</span><span class="tt-val" id="tt-unleashed-stats">0 / 0 / 0.0000</span></div>
+        <div class="tt-row"><span class="tt-label">Int/Eps/Accel</span><span class="tt-val" id="tt-unleashed-stats">0 / 0 / 0.00000</span></div>
         <div class="tt-row"><span class="tt-label">Session W/L</span><span class="tt-val"><span id="tt-wins">0</span> / <span id="tt-losses">0</span></span></div>
         <div id="tt-signals-list"></div>
         <div class="tt-config-section-label">Real Execution</div>
@@ -330,7 +330,7 @@
     const speedTrend = prevTick ? (absSpeed - prevTick.absSpeed) : 0;
     const lastDigit = Math.floor(Math.round(price * 100) / 10) % 10, deltaChange = prevTick ? deltaSteps - prevTick.deltaSteps : 0;
     const preSpeed = prevTick ? prevTick.speed : 0;
-    const acceleration = speed - preSpeed;
+    const acceleration = Math.round((speed - preSpeed) * 100000) / 100000;
     const accel = acceleration; // Alias for compatibility with previous updates
     const intensity = Math.abs(speed) / (speedMean || 0.0007);
     const deltaChangeVal = prevTick ? deltaSteps - prevTick.deltaSteps : 0;
@@ -382,7 +382,7 @@
       const tMinus5 = ticks[ticks.length - 6]; // T0 vs T-5 is 5 intervals
       speed5 = (price - tMinus5.price) / 5; // Displacement over 5 ticks / 5
     }
-    const accel5 = prevTick ? speed5 - (prevTick.speed5 || 0) : 0;
+    const accel5 = prevTick ? Math.round((speed5 - (prevTick.speed5 || 0)) * 100000) / 100000 : 0;
 
     if (delta > 0) { upStreak++; downStreak = 0; } else if (delta < 0) { downStreak++; upStreak = 0; } else { upStreak = 0; downStreak = 0; }
     const state = { epoch, price, direction, deltaSteps, deltaTime, speed, absSpeed, speedTrend, upStreak, downStreak, lastDigit, deltaChange: deltaChangeVal, receivedAt: now, accel, intensity, preSpeed, acceleration, trendEma, ema10: trendEma, adx, rsi, speed5, accel5 };
@@ -554,7 +554,7 @@
       const isFlip = Math.sign(t0.preSpeed) !== Math.sign(t0.speed);
       const isStrongAccel = Math.abs(t0.acceleration) > 0.0007;
       const isCleanMove = Math.abs(t0.deltaSteps) === 1;
-      if (streak <= 2 && isFlip && isStrongAccel && isCleanMove) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 90, triggerDesc: `Rev Ignition (Accel:${t0.acceleration.toFixed(4)})` };
+      if (streak <= 2 && isFlip && isStrongAccel && isCleanMove) return { type: t0.direction === 1 ? 'BUY' : 'SELL', conf: 90, triggerDesc: `Rev Ignition (Accel:${t0.acceleration.toFixed(5)})` };
       return null;
     };
 
@@ -606,7 +606,7 @@
         const isUp = t0.direction === 1, isDown = t0.direction === -1;
         if ((isUp && !buyOk) || (isDown && !sellOk)) {
             if (tickSeq % 5 === 0) {
-               console.log(`[Unleashed] P:${t0.price.toFixed(2)} EMA:${t0.trendEma.toFixed(2)} ADX:${currentADX.toFixed(1)} RSI:${currentRSI.toFixed(1)} BBW:${bbWidth.toFixed(2)} Int:${t0.intensity.toFixed(2)} Eps:${t0.deltaChange} Accel:${currentAccel.toFixed(4)}`);
+               console.log(`[Unleashed] P:${t0.price.toFixed(2)} EMA:${t0.trendEma.toFixed(2)} ADX:${currentADX.toFixed(1)} RSI:${currentRSI.toFixed(1)} BBW:${bbWidth.toFixed(2)} Int:${t0.intensity.toFixed(2)} Eps:${t0.deltaChange} Accel:${currentAccel.toFixed(5)}`);
                if (isUp) {
                    if (!(t0.price > t0.trendEma)) console.log(" -> Fail: Price <= EMA");
                    if (cfg.adxMin !== undefined && currentADX < cfg.adxMin) console.log(" -> Fail: ADX < min");
