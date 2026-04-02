@@ -116,6 +116,7 @@
           <div class="tt-config-row"><label>Eps Sell Range</label><div style="display:flex;gap:4px;"><input type="number" id="tt-cfg-eps-sell-min" min="-10" max="10" step="1" style="width:50px;" value="-5"><input type="number" id="tt-cfg-eps-sell-max" min="-10" max="10" step="1" style="width:50px;" value="-1"></div></div>
           <div class="tt-config-row"><label>Accel Buy Range</label><div style="display:flex;gap:4px;"><input type="number" id="tt-cfg-accel-buy-min" min="-1" max="1" step="0.0001" style="width:50px;" value="0.0001"><input type="number" id="tt-cfg-accel-buy-max" min="-1" max="1" step="0.0001" style="width:50px;" value="0.01"></div></div>
           <div class="tt-config-row"><label>Accel Sell Range</label><div style="display:flex;gap:4px;"><input type="number" id="tt-cfg-accel-sell-min" min="-1" max="1" step="0.0001" style="width:50px;" value="-0.01"><input type="number" id="tt-cfg-accel-sell-max" min="-1" max="1" step="0.0001" style="width:50px;" value="-0.0001"></div></div>
+          <div class="tt-config-row"><label>Streak Range</label><div style="display:flex;gap:4px;"><input type="number" id="tt-cfg-min-streak" min="0" max="100" step="1" style="width:50px;" value=""><input type="number" id="tt-cfg-max-streak" min="0" max="100" step="1" style="width:50px;" value="4"></div></div>
           <div class="tt-config-row"><label>Debug Signals</label><input type="checkbox" id="tt-cfg-debug"></div>
           <div class="tt-config-section-label">Real Trade Master</div>
           <div class="tt-config-row"><label style="color:#f0a060;font-weight:700;">Enable Real Execution</label><label class="tt-switch"><input type="checkbox" id="tt-cfg-real-enabled"><span class="tt-slider"></span></label></div>
@@ -176,6 +177,8 @@
     document.getElementById('tt-cfg-accel-buy-max').addEventListener('change', function () { const v = parseFloat(this.value); cfg.accelBuyMax = isNaN(v) ? undefined : v; saveCfg(); });
     document.getElementById('tt-cfg-accel-sell-min').addEventListener('change', function () { const v = parseFloat(this.value); cfg.accelSellMin = isNaN(v) ? undefined : v; saveCfg(); });
     document.getElementById('tt-cfg-accel-sell-max').addEventListener('change', function () { const v = parseFloat(this.value); cfg.accelSellMax = isNaN(v) ? undefined : v; saveCfg(); });
+    document.getElementById('tt-cfg-min-streak').addEventListener('change', function () { const v = parseInt(this.value); cfg.minStreak = isNaN(v) ? undefined : v; saveCfg(); });
+    document.getElementById('tt-cfg-max-streak').addEventListener('change', function () { const v = parseInt(this.value); cfg.maxStreak = isNaN(v) ? undefined : v; saveCfg(); });
     document.getElementById('tt-cfg-debug').addEventListener('change', function () { cfg.debugSignals = this.checked; saveCfg(); });
     document.getElementById('tt-cfg-real-enabled').addEventListener('change', function () { cfg.realTradeEnabled = this.checked; saveCfg(); });
     document.getElementById('tt-real-export').addEventListener('click', exportRealCSV);
@@ -278,9 +281,12 @@
         let ok = true;
         if (cfg.strategyMode === 'unleashed') {
           const isUp = t0.direction === 1, isDown = t0.direction === -1;
+          const currentStreak = Math.max(t0.upStreak, t0.downStreak);
           if (isUp) {
             if (cfg.minIntensity !== undefined && currentIntensity < cfg.minIntensity) ok = false;
             if (cfg.maxIntensity !== undefined && currentIntensity > cfg.maxIntensity) ok = false;
+            if (cfg.minStreak !== undefined && currentStreak < cfg.minStreak) ok = false;
+            if (cfg.maxStreak !== undefined && currentStreak > cfg.maxStreak) ok = false;
             if (cfg.epsBuyMin !== undefined && currentEpsilon < cfg.epsBuyMin) ok = false;
             if (cfg.epsBuyMax !== undefined && currentEpsilon > cfg.epsBuyMax) ok = false;
             if (cfg.accelBuyMin !== undefined && currentAccel < cfg.accelBuyMin) ok = false;
@@ -288,6 +294,8 @@
           } else if (isDown) {
             if (cfg.minIntensity !== undefined && currentIntensity < cfg.minIntensity) ok = false;
             if (cfg.maxIntensity !== undefined && currentIntensity > cfg.maxIntensity) ok = false;
+            if (cfg.minStreak !== undefined && currentStreak < cfg.minStreak) ok = false;
+            if (cfg.maxStreak !== undefined && currentStreak > cfg.maxStreak) ok = false;
             if (cfg.epsSellMin !== undefined && currentEpsilon < cfg.epsSellMin) ok = false;
             if (cfg.epsSellMax !== undefined && currentEpsilon > cfg.epsSellMax) ok = false;
             if (cfg.accelSellMin !== undefined && currentAccel < cfg.accelSellMin) ok = false;
@@ -567,6 +575,8 @@
         if (cfg.maxBBWidth !== undefined && bbWidth > cfg.maxBBWidth) buyOk = false;
         if (cfg.minIntensity !== undefined && t0.intensity < cfg.minIntensity) buyOk = false;
         if (cfg.maxIntensity !== undefined && t0.intensity > cfg.maxIntensity) buyOk = false;
+        if (cfg.minStreak !== undefined && streak < cfg.minStreak) buyOk = false;
+        if (cfg.maxStreak !== undefined && streak > cfg.maxStreak) buyOk = false;
         if (cfg.epsBuyMin !== undefined && t0.deltaChange < cfg.epsBuyMin) buyOk = false;
         if (cfg.epsBuyMax !== undefined && t0.deltaChange > cfg.epsBuyMax) buyOk = false;
         if (cfg.accelBuyMin !== undefined && currentAccel < cfg.accelBuyMin) buyOk = false;
@@ -584,6 +594,8 @@
         if (cfg.maxBBWidth !== undefined && bbWidth > cfg.maxBBWidth) sellOk = false;
         if (cfg.minIntensity !== undefined && t0.intensity < cfg.minIntensity) sellOk = false;
         if (cfg.maxIntensity !== undefined && t0.intensity > cfg.maxIntensity) sellOk = false;
+        if (cfg.minStreak !== undefined && streak < cfg.minStreak) sellOk = false;
+        if (cfg.maxStreak !== undefined && streak > cfg.maxStreak) sellOk = false;
         if (cfg.epsSellMin !== undefined && t0.deltaChange < cfg.epsSellMin) sellOk = false;
         if (cfg.epsSellMax !== undefined && t0.deltaChange > cfg.epsSellMax) sellOk = false;
         if (cfg.accelSellMin !== undefined && currentAccel < cfg.accelSellMin) sellOk = false;
@@ -605,6 +617,8 @@
                    if (cfg.maxBBWidth !== undefined && bbWidth > cfg.maxBBWidth) console.log(" -> Fail: BBW > max");
                    if (cfg.minIntensity !== undefined && t0.intensity < cfg.minIntensity) console.log(" -> Fail: Intensity < min");
                    if (cfg.maxIntensity !== undefined && t0.intensity > cfg.maxIntensity) console.log(" -> Fail: Intensity > max");
+                   if (cfg.minStreak !== undefined && streak < cfg.minStreak) console.log(" -> Fail: Streak < min");
+                   if (cfg.maxStreak !== undefined && streak > cfg.maxStreak) console.log(" -> Fail: Streak > max");
                    if (cfg.epsBuyMin !== undefined && t0.deltaChange < cfg.epsBuyMin) console.log(" -> Fail: EpsBuy < min");
                    if (cfg.epsBuyMax !== undefined && t0.deltaChange > cfg.epsBuyMax) console.log(" -> Fail: EpsBuy > max");
                    if (cfg.accelBuyMin !== undefined && currentAccel < cfg.accelBuyMin) console.log(" -> Fail: Accel < min");
@@ -620,6 +634,8 @@
                    if (cfg.maxBBWidth !== undefined && bbWidth > cfg.maxBBWidth) console.log(" -> Fail: BBW > max");
                    if (cfg.minIntensity !== undefined && t0.intensity < cfg.minIntensity) console.log(" -> Fail: Intensity < min");
                    if (cfg.maxIntensity !== undefined && t0.intensity > cfg.maxIntensity) console.log(" -> Fail: Intensity > max");
+                   if (cfg.minStreak !== undefined && streak < cfg.minStreak) console.log(" -> Fail: Streak < min");
+                   if (cfg.maxStreak !== undefined && streak > cfg.maxStreak) console.log(" -> Fail: Streak > max");
                    if (cfg.epsSellMin !== undefined && t0.deltaChange < cfg.epsSellMin) console.log(" -> Fail: EpsSell < min");
                    if (cfg.epsSellMax !== undefined && t0.deltaChange > cfg.epsSellMax) console.log(" -> Fail: EpsSell > max");
                    if (cfg.accelSellMin !== undefined && currentAccel < cfg.accelSellMin) console.log(" -> Fail: Accel < min");
@@ -751,7 +767,7 @@
   }
   function safeStorage(op, key, val) { try { if (op === 'get') return JSON.parse(localStorage.getItem(key)); if (op === 'set') localStorage.setItem(key, JSON.stringify(val)); } catch (_) { } return null; }
   function saveCfg() { safeStorage('set', 'tt-cfg', cfg); }
-  function loadCfg() { const stored = safeStorage('get', 'tt-cfg'); return Object.assign({ strategyMode: 'hybrid', epsilon: 0.1, maxEpsilon: undefined, epsBuyMin: undefined, epsBuyMax: undefined, epsSellMin: undefined, epsSellMax: undefined, minIntensity: undefined, maxIntensity: undefined, accelBuyMin: undefined, accelBuyMax: undefined, accelSellMin: undefined, accelSellMax: undefined, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true, adxMin: undefined, adxMax: undefined, adxPeriod: 14, rsiPeriod: 14, rsiBuyMin: undefined, rsiBuyMax: undefined, rsiSellMin: undefined, rsiSellMax: undefined, trendEmaPeriod: 10, minBBWidth: undefined, maxBBWidth: undefined }, stored || {}); }
+  function loadCfg() { const stored = safeStorage('get', 'tt-cfg'); return Object.assign({ strategyMode: 'hybrid', epsilon: 0.1, maxEpsilon: undefined, epsBuyMin: undefined, epsBuyMax: undefined, epsSellMin: undefined, epsSellMax: undefined, minIntensity: undefined, maxIntensity: undefined, minStreak: undefined, maxStreak: 4, accelBuyMin: undefined, accelBuyMax: undefined, accelSellMin: undefined, accelSellMax: undefined, realTradeEnabled: false, realTimeoutMs: 40000, realCooldownMs: 5000, postTradeCooldownTicks: 5, postTradeCooldownMs: 5000, debugSignals: true, adxMin: undefined, adxMax: undefined, adxPeriod: 14, rsiPeriod: 14, rsiBuyMin: undefined, rsiBuyMax: undefined, rsiSellMin: undefined, rsiSellMax: undefined, trendEmaPeriod: 10, minBBWidth: undefined, maxBBWidth: undefined }, stored || {}); }
   function applyConfigToUI() {
     const dbg = document.getElementById('tt-cfg-debug'),
           re = document.getElementById('tt-cfg-real-enabled'),
@@ -785,6 +801,10 @@
     if (epsBuyMax) epsBuyMax.value = cfg.epsBuyMax !== undefined ? cfg.epsBuyMax : '';
     if (epsSellMin) epsSellMin.value = cfg.epsSellMin !== undefined ? cfg.epsSellMin : '';
     if (epsSellMax) epsSellMax.value = cfg.epsSellMax !== undefined ? cfg.epsSellMax : '';
+    const minStreakEl = document.getElementById('tt-cfg-min-streak'),
+          maxStreakEl = document.getElementById('tt-cfg-max-streak');
+    if (minStreakEl) minStreakEl.value = cfg.minStreak !== undefined ? cfg.minStreak : '';
+    if (maxStreakEl) maxStreakEl.value = cfg.maxStreak !== undefined ? cfg.maxStreak : '';
     if (minIntensity) minIntensity.value = cfg.minIntensity !== undefined ? cfg.minIntensity : '';
     if (maxIntensity) maxIntensity.value = cfg.maxIntensity !== undefined ? cfg.maxIntensity : '';
     if (accelBuyMin) accelBuyMin.value = cfg.accelBuyMin !== undefined ? cfg.accelBuyMin : '';
